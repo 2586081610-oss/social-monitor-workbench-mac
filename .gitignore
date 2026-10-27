@@ -64,4 +64,9 @@ tools/rsshub/
 # 第三方二进制（ffmpeg 等，安装脚本负责放入）
 tools/bin/*.exe
 tools/bin/*.dll
+tools/bin/ffmpeg
 tools/ffmpeg-exe/
+
+# Mac 适配：运行态与隔离沙箱（脚本生成，勿入库）
+.run/
+.sandbox/
