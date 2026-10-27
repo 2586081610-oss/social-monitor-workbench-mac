@@ -42,6 +42,10 @@ def _get_engine():
     except ImportError:
         raise PipelineOfflineError("转写引擎 funasr 未安装（首次部署需预下载 paraformer-zh 模型，K18）") from None
     logger.info("loading paraformer-zh model (first load may take seconds)...")
+    # 三个模型在 ModelScope 均为滚动 master revision（2026-10-28 API 核验，证据
+    # preflight/evidence/modelscope-iic_*.json）；内容级锚点由部署时生成的
+    # sha256 manifest（preflight/evidence/asr-model-manifest-*.json）提供。
+    # 显式写 revision，避免隐式行为变化时无据可查。
     _ENGINE = AutoModel(
         model=_ASR_MODEL,
         vad_model=_VAD_MODEL,
@@ -49,6 +53,7 @@ def _get_engine():
         punc_model=_PUNC_MODEL,
         device="cpu",
         disable_update=True,
+        revision="master",
     )
     logger.info("paraformer-zh model ready")
     return _ENGINE
