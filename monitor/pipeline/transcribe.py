@@ -45,15 +45,19 @@ def _get_engine():
     # 三个模型在 ModelScope 均为滚动 master revision（2026-10-28 API 核验，证据
     # preflight/evidence/modelscope-iic_*.json）；内容级锚点由部署时生成的
     # sha256 manifest（preflight/evidence/asr-model-manifest-*.json）提供。
-    # 显式写 revision，避免隐式行为变化时无据可查。
+    # funasr 1.4.16 的参数名：主模型 model_revision（download_from_ms.py:53）、
+    # vad_model_revision / punc_model_revision（auto_model.py:476/489），
+    # 缺省值已为 master；此处显式写出，避免隐式行为变化时无据可查。
     _ENGINE = AutoModel(
         model=_ASR_MODEL,
+        model_revision="master",
         vad_model=_VAD_MODEL,
+        vad_model_revision="master",
         vad_kwargs={"max_single_segment_time": 30000},
         punc_model=_PUNC_MODEL,
+        punc_model_revision="master",
         device="cpu",
         disable_update=True,
-        revision="master",
     )
     logger.info("paraformer-zh model ready")
     return _ENGINE
