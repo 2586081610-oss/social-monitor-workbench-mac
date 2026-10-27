@@ -116,3 +116,24 @@
 
 - 前端若 `dist` 未构建，先执行：`cd frontend && npm run build`
 - 重复启动前务必先 `stop_all.bat`，避免 8000/5173 端口冲突。
+
+---
+
+## 7. Mac（arm64）安装与版本锚定
+
+- **一键安装**：`tools/install-mac.sh`（核心：uv + `.venv`(CPython 3.13.18) + 四个分层 lock + Node + ffmpeg + 前端构建；`--upstreams` 克隆四上游并装各自依赖；`--browsers` 装 Playwright chromium）。幂等可重复运行；不装 brew/docker，不改系统 Python。
+- **启停**：`start_all.sh`（默认只启动后端+前端；`--sandbox` 隔离验收）、`start_monitor.sh`（显式启动监控层——其启动即轮询）、`stop_all.sh`（只停止 PID 记录且身份核验通过的本项目进程；端口被无归属进程占用时仅报告）。
+- **版本锚定**（与 `preflight/mac-adaptation-plan.md` §1 一致，克隆均不入库）：
+
+| 上游 | 锚定 | 说明 |
+|------|------|------|
+| jiji262/douyin-downloader | commit `ed863617aa52353821aca8fdebcfad4e916ebff5` | **官方 README（2026-10-28）声明：CLI 单视频/图文/合集/音乐/喜欢/收藏下载受抖音风控，更新 Cookie 或重试无解**；参数契约吻合≠可用，C2 实测前不宣称可用 |
+| MediaCrawler | commit `68d9ef1c1da22eab75940dfd7cec259907006538` | 无 release/tag；独立 `.venv`（uv sync） |
+| XHS-Downloader | tag `2.8` = commit `47840a1bee8438324ff10753c4291148c46071c8` | 依赖装入主 venv（download.py 以主解释器直调） |
+| RSSHub | tag `v2026.10.26-8483.9515261` | Node 22 + corepack pnpm 12.15.0 |
+
+- **分层 lock**（仓库根，`uv pip compile` 产物）：`requirements.lock`（核心9项）、`requirements-download.lock`（yutto 2.3.1 / yt-dlp 2026.10.26 / curl-cffi 0.17.0）、`requirements-asr.lock`（funasr 1.4.16 / torch 2.14.1 / imageio-ffmpeg 0.6.0）、`requirements-browser.lock`（playwright 1.64.1）。
+- **ffmpeg**：`imageio-ffmpeg`（0.6.0 为分发器版本）自带 arm64 二进制 → `tools/bin/ffmpeg`（不入库，`tools/bin/*.exe` 保留给 Windows）。
+- **Mac cookie 导出**：`tools/export_dy_cookie_mac.py`、`tools/export_xhs_cookie_mac.py`（输出格式与 Windows 版一致；浏览器通道 edge → chrome → chromium 自动降级；`--dry-run` 只验证环境）。
+- **ASR 模型**（C2/D 阶段下载）：paraformer-large / fsmn-vad / ct-punc-c 三个 ModelScope 仓库均为 rolling `master`，下载后生成 sha256 manifest 并在 `transcribe.py` 显式 `revision`。
+- **WorkBuddy**：复用本机已装应用（/Applications/WorkBuddy.app），项目不安装、不依赖其托管运行时。
