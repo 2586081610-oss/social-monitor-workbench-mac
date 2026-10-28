@@ -237,9 +237,9 @@ class ArchiveWorker:
         now_text = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         values: dict[str, Any] = {"updated_at": now_text}
         if cursor is not None:
-            values["cursor_json"] = cursor
+            values["cursor"] = cursor
         if statistics is not None:
-            values["statistics_json"] = statistics
+            values["statistics"] = statistics
         if status is not None:
             values["status"] = status
             values["error"] = error
