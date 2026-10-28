@@ -198,15 +198,41 @@ def run_ingest(
             "disabled",
             f"{SOURCE_ENV}=off（默认）。显式设置 {SOURCE_ENV}=file|api 或 --source 后才会读取本人数据",
         )
+    # Parse failures must not initialize storage either.
+    snapshot = _load_snapshot(enabled, account, base_dir)
     from app.core.db import init_db
     from monitor.store.shared_db import SessionLocal
 
-    # 独立 CLI 进程没有 backend lifespan：先幂等建表（含 personal_source_marks）
-    init_db()
-    snapshot = _load_snapshot(enabled, account, base_dir)
-    with SessionLocal() as db:
-        report = ingest_snapshot(snapshot, db, dry_run=dry_run)
-        if not dry_run:
+    if dry_run:
+        import sqlite3
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from app.core.config import settings
+
+        # Preview all mutations on a private in-memory copy. Immutable read avoids
+        # journal/SHM creation on the source; refuse live WAL rather than omit it.
+        path = settings.database_path
+        memory = sqlite3.connect(":memory:")
+        preview_engine = create_engine("sqlite://", creator=lambda: memory, poolclass=StaticPool)
+        try:
+            if path.exists():
+                wal = Path(str(path) + "-wal")
+                if wal.exists() and wal.stat().st_size:
+                    raise PersonalSourceError("database_busy", "试运行需静止数据库：请先停止服务并完成 WAL 检查点")
+                with sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True) as original:
+                    original.backup(memory)
+            preview_sessions = sessionmaker(bind=preview_engine, autoflush=False, expire_on_commit=False)
+            init_db(db_engine=preview_engine, session_factory=preview_sessions, create_dirs=False)
+            with preview_sessions() as db:
+                report = ingest_snapshot(snapshot, db, dry_run=True)
+        finally:
+            preview_engine.dispose()
+    else:
+        # Standalone CLI has no backend lifespan.
+        init_db()
+        with SessionLocal() as db:
+            report = ingest_snapshot(snapshot, db)
             db.commit()
     return report
 

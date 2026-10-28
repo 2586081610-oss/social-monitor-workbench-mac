@@ -50,18 +50,21 @@ def _ensure_column(conn, table: str, column: str, ddl: str) -> None:
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
-def init_db() -> None:
+def init_db(*, db_engine=None, session_factory=None, create_dirs: bool = True) -> None:
     """建表 + 种子 cookie 健康度行 + 创建存储目录。幂等，聚合 API 与监控层共用。"""
-    _ensure_dirs()
+    db_engine = engine if db_engine is None else db_engine
+    session_factory = SessionLocal if session_factory is None else session_factory
+    if create_dirs:
+        _ensure_dirs()
     # 延迟导入避免循环依赖（models 依赖 db.Base）
     from app.models import (  # noqa: F401  确保全部表注册到 metadata
         CookieHealth,
     )
 
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=db_engine)
 
     # v0.4 轻量迁移：works 新增 content_type / media_urls（幂等，已存在则跳过）
-    with engine.begin() as conn:
+    with db_engine.begin() as conn:
         _ensure_column(conn, "works", "content_type", "VARCHAR(10) NOT NULL DEFAULT 'video'")
         _ensure_column(conn, "works", "media_urls", "TEXT")
         # v0.5 迁移：lexicon 新增 category（兴趣区间：finance/ai/fitness/business/general）
@@ -79,7 +82,7 @@ def init_db() -> None:
         _ensure_column(conn, "works", "published_time_timezone", "VARCHAR(64)")
         _ensure_column(conn, "works", "metadata_checked_at", "TEXT")
 
-    with SessionLocal() as db:
+    with session_factory() as db:
         from app.repositories.health_repo import upsert_cookie
 
         for platform in _COOKIE_PLATFORMS:
