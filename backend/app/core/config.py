@@ -114,6 +114,10 @@ class Settings:
         self.monitor_personal_sync_tick_interval: int = int(
             os.getenv("MONITOR_PERSONAL_SYNC_TICK_INTERVAL", "60")
         )
+        # 下载认领超时：认领超过该分钟数或认领进程已死才允许安全恢复（防误重置活跃下载）
+        self.personal_download_claim_timeout_minutes: int = int(
+            os.getenv("PERSONAL_DOWNLOAD_CLAIM_TIMEOUT_MINUTES", "60")
+        )
         self.monitor_run_pipeline: bool = os.getenv("MONITOR_RUN_PIPELINE", "false").lower() == "true"
         self.douyin_cdp_enabled: bool = os.getenv("ENABLE_DOUYIN_CDP", "false").lower() == "true"
         self.douyin_cdp_profile_dir: str = os.getenv("DOUYIN_CDP_PROFILE_DIR", "")

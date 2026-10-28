@@ -425,7 +425,12 @@ def main() -> int:
 
             report.download_processed = download_personal_source_works()
     except PersonalSourceError as exc:
-        print(json.dumps({"status": "error", "kind": exc.kind, "message": str(exc)}, ensure_ascii=False))
+        # 消息本身按白名单构造；再过一遍脱敏兜底（不落凭据/账号标识）
+        print(json.dumps({
+            "status": "error",
+            "kind": exc.kind,
+            "message": redact_sensitive_text(str(exc)),
+        }, ensure_ascii=False))
         return 1
     # 安全输出：只含类别与数量，不含作品/收藏夹/账号标识（子进程输出会被留存在手动日志）
     print(json.dumps({"status": "ok", **report.to_safe_dict()}, ensure_ascii=False, indent=1))

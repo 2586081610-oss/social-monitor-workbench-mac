@@ -586,3 +586,267 @@ def test_f2_dry_run_does_not_initialize_existing_empty_db(tmp_path, monkeypatch)
     assert before == after == 0
     assert config["scopes"] == ("like", "collection", "collections")
     assert config["sec_user_id"] == ""
+
+
+# ---------- 第三轮复审回归（复现文件场景固化） ----------
+
+def test_two_workers_claim_once(db, monkeypatch, clean_settings):
+    """跨进程并发：两个调用同时竞争同一作品，原子认领保证只处理一次。"""
+    import threading
+    from threading import Barrier
+
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9000001", title="synthetic", url="u",
+                source_type="personal_source", content_type="video", status="NEW")
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9000001"})
+    calls: list[tuple[int, bool | None]] = []
+    barrier = Barrier(2)
+    started = threading.Event()
+
+    def fake_grant():
+        # 两个线程都先到达授权检查，制造"都选中、都未认领"的竞争窗口
+        barrier.wait(timeout=5)
+        started.set()
+        return True
+
+    def fake_process(db_, w, **kwargs):
+        calls.append((w.id, kwargs.get("allow_browser_fallback")))
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_authorization_granted", fake_grant)
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(jobs.download_personal_source_works) for _ in range(2)]
+            for future in futures:
+                future.result(timeout=10)
+        assert started.is_set()
+        assert len(calls) == 1, f"processing calls={len(calls)}"
+        assert calls[0][1] is False  # 兜底禁用
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_revoking_authorization_stops_remaining_batch(db, monkeypatch, clean_settings):
+    """处理第 1 条时跨进程关闭授权 → 本批剩余作品不再开始。"""
+    from monitor import jobs
+
+    w1 = Work(platform="douyin", external_id="9000002", title="x", url="u",
+              source_type="personal_source", content_type="video", status="NEW")
+    w2 = Work(platform="douyin", external_id="9000003", title="y", url="u2",
+              source_type="personal_source", content_type="video", status="NEW")
+    db.add_all([w1, w2])
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9000002", "9000003"})
+    calls: list[str] = []
+
+    def fake_process(db_, w, **kwargs):
+        calls.append(w.external_id)
+        if len(calls) == 1:
+            with jobs.SessionLocal() as other:
+                _set(other, AUTO_DOWNLOAD_KEY, "false")
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    try:
+        jobs.download_personal_source_works()
+        assert calls == ["9000002"], f"processing after revoke={calls}"
+    finally:
+        for w in (w1, w2):
+            row = db.get(Work, w.id)
+            if row is not None:
+                db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_restart_surfaces_interrupted_and_count(db, monkeypatch, clean_settings):
+    """异常退出留下的 DOWNLOADING（个人事实作品）：积压数如实显示，不再为 0。"""
+    from app.services import personal_source_service
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9000004", title="x", url="u",
+                source_type="personal_source", content_type="video", status="DOWNLOADING")
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9000004"})
+    calls: list[str] = []
+    monkeypatch.setattr(jobs, "_process_work", lambda db_, w, **kw: calls.append(w.id))
+    try:
+        pending = personal_source_service.count_download_locks(db)
+        assert pending >= 1  # 中断项计入积压显示（复审项 6）
+        # 无认领戳的 DOWNLOADING：不自动恢复（避免误重置活跃全局下载），保持可操作状态
+        jobs.download_personal_source_works()
+        assert calls == []
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_stale_claim_is_recovered_and_processed(db, monkeypatch, clean_settings):
+    """带认领戳且进程已死/超时的 DOWNLOADING → 安全恢复为 QUEUED 并被重新处理。"""
+    from datetime import datetime, timedelta, timezone
+
+    from monitor import jobs
+
+    stale_time = (datetime.now(timezone.utc) - timedelta(minutes=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    work = Work(platform="douyin", external_id="9000005", title="x", url="u",
+                source_type="personal_source", content_type="video", status="DOWNLOADING",
+                download_claimed_at=stale_time, download_claim_pid=999999999)
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9000005"})
+    calls: list[str] = []
+
+    def fake_process(db_, w, **kw):
+        calls.append(w.id)
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    try:
+        jobs.download_personal_source_works()
+        assert calls == [work.id]  # 过期认领被恢复并处理
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_active_claim_not_recovered(db, monkeypatch, clean_settings):
+    """认领新鲜且进程存活（当前进程）：不得重置，避免误伤活跃下载。"""
+    import os
+
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9000006", title="x", url="u",
+                source_type="personal_source", content_type="video", status="DOWNLOADING",
+                download_claimed_at=now_iso(), download_claim_pid=os.getpid())
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9000006"})
+    calls: list[str] = []
+    monkeypatch.setattr(jobs, "_process_work", lambda db_, w, **kw: calls.append(w.id))
+    try:
+        jobs.download_personal_source_works()
+        assert calls == []
+        assert db.get(Work, work.id).status == "DOWNLOADING"  # 未被动
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_tick_sync_failure_still_downloads_independent(db, monkeypatch, clean_settings):
+    """同步抛错 → 记录安全类别后仍进入下载消费；断言同步桩确实被调用（独立数据，乱序安全）。"""
+    from monitor import jobs
+    from app.models import PollLog
+
+    _set(db, ENABLED_KEY, "true")
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    # 独立数据：清掉共享库里的同步日志，确保本用例同步必然到期
+    db.query(PollLog).filter_by(platform="douyin-personal").delete()
+    db.commit()
+
+    boom_calls: list[int] = []
+
+    def boom(*args, **kwargs):
+        boom_calls.append(1)
+        raise RuntimeError("Authorization: Bearer FAKESECRETVALUENOTREAL")
+
+    monkeypatch.setattr("monitor.personal_source_ingest.run_ingest", boom)
+    download_calls: list[int] = []
+    monkeypatch.setattr(jobs, "download_personal_source_works",
+                        lambda **kw: download_calls.append(1) or 0)
+    messages: list[str] = []
+    monkeypatch.setattr(jobs.logger, "warning", lambda msg, *args: messages.append(msg % args))
+    jobs.check_douyin_personal_sync()
+    assert boom_calls == [1]  # 同步桩确实执行
+    assert download_calls == [1]  # 同步失败后仍消费积压
+    assert all("FAKESECRETVALUENOTREAL" not in m for m in messages)  # 令牌不进日志
+    assert any("error_type=RuntimeError" in m for m in messages)  # 只记安全类别
+
+
+def test_global_worker_disables_browser_for_personal_cross_source(db, monkeypatch, clean_settings):
+    """全局流水线处理 monitor 来源 + 个人事实（QUEUED）作品：显式禁用浏览器兜底。"""
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9000007", title="x", url="u",
+                source_type="monitor", content_type="video", status="QUEUED")
+    db.add(work)
+    db.flush()
+    db.add(PersonalSourceMark(platform="douyin", external_id="9000007", source_mark="like",
+                              source_channel="f2", snapshot_id="synthetic", first_seen_at=now_iso(),
+                              last_seen_at=now_iso(), work_id=work.id))
+    db.commit()
+    monkeypatch.setattr(jobs.settings, "monitor_run_pipeline", True)
+    original = _quarantine_other_works(db, {"9000007"})
+    calls: list[bool | None] = []
+
+    def fake_process(db_, w, **kw):
+        calls.append(kw.get("allow_browser_fallback"))
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    try:
+        jobs.run_pipeline()
+        assert calls == [False], f"global pipeline browser fallback={calls}"
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_download_checkpoint_default_infers_personal_facts(db, monkeypatch):
+    """download_and_checkpoint 默认推断：跨来源（monitor 来源 + 个人事实）→ 禁兜底。"""
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9000008", title="x", url="u",
+                source_type="monitor", content_type="video", status="QUEUED")
+    db.add(work)
+    db.flush()
+    db.add(PersonalSourceMark(platform="douyin", external_id="9000008", source_mark="favorite",
+                              source_channel="f2", snapshot_id="s", first_seen_at=now_iso(),
+                              last_seen_at=now_iso(), work_id=work.id))
+    db.commit()
+
+    real_facts = jobs._work_has_personal_facts
+    observed: dict = {}
+
+    def spy_facts(db_, work_id):
+        observed["result"] = real_facts(db_, work_id)
+        return observed["result"]
+
+    def fake_resolve(db_, w):
+        raise RuntimeError("stop-after-inference")  # 推断发生在元数据解析之前
+
+    monkeypatch.setattr(jobs, "_work_has_personal_facts", spy_facts)
+    monkeypatch.setattr(jobs, "_resolve_work_metadata", fake_resolve)
+    try:
+        jobs.download_and_checkpoint(db, work)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "stop-after-inference" in str(exc)
+    assert observed.get("result") is True  # 事实判定识别出个人来源覆盖 → 兜底默认禁用

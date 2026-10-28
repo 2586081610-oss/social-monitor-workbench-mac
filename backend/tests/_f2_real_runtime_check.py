@@ -7,7 +7,13 @@
   login_expired / 下一页为空 / 多夹混合（一个空夹不中断其他夹）；
 - 真实 F2 异常类的翻译与消息脱敏；
 - 点赞范围缺 sec_user_id 提前报错。
-合成 cookie 写入 tempfile，绝不写真实业务目录。网络全程打桩，无真实请求。
+合成 cookie 写入 tempfile，绝不写真实业务目录。
+
+断网保证：本脚本在子进程内先安装 socket 守卫（任何 connect/getaddrinfo
+都会抛错），并对 F2 请求模型的 msToken 生成打合成桩——真实 F2 在构造
+UserCollectsVideo 等请求模型时会调用 TokenManager.cached_msToken()，
+首次调用会联网请求 mssdk.bytedance.com；不打桩就不是真正的无网络测试。
+全程无任何真实网络请求。
 
 输出 JSON：{"ok": true/false, "checks": {...}, "failures": [...]}
 """
@@ -16,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -23,10 +30,35 @@ from pathlib import Path
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(WORKSPACE_ROOT))
 
+
+def install_network_guard() -> None:
+    """子进程级断网：任何套接字连接/DNS 解析都立即失败（防线，不是提示）。"""
+    class _Blocked(RuntimeError):
+        pass
+
+    def _blocked(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise _Blocked("network access attempted in offline check")
+
+    socket.socket.connect = _blocked
+    socket.socket.connect_ex = _blocked
+    socket.create_connection = _blocked
+    socket.getaddrinfo = _blocked
+
+
+install_network_guard()
+
 import monitor.platforms.f2_fetch as fetch  # noqa: E402
 from f2.apps.douyin.crawler import DouyinCrawler  # noqa: E402
 from f2.apps.douyin.filter import UserPostFilter  # noqa: E402
 from f2.apps.douyin.handler import DouyinHandler, rich_console  # noqa: E402
+from f2.apps.douyin.utils import TokenManager  # noqa: E402
+
+# msToken 合成桩：真实 F2 的请求模型（UserCollects/UserCollectsVideo 等）在类定义时
+# 把 TokenManager.cached_msToken 绑定进 pydantic default_factory，事后替换方法无效；
+# cached_msToken 只查 cls._msToken_cache 缓存，为 None 才联网请求 mssdk.bytedance.com。
+# 因此：预置缓存值（原函数直接返回、不联网）+ 桩掉真实获取函数兜底。
+TokenManager._msToken_cache = "synthetic-ms-token-for-offline-tests"
+TokenManager.gen_real_msToken = classmethod(lambda cls: "synthetic-ms-token-for-offline-tests")
 
 # 静默 F2 日志与 rich 输出（同 f2_fetch 主流程一致）
 rich_console.quiet = True

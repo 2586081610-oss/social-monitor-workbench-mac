@@ -98,7 +98,7 @@ export default function PersonalSourcePage() {
           : '定时发现保持关闭（手动同步仍可用）',
       );
       if (saved.enabled && !statusQuery.data?.schedule_active) {
-        parts.push('注意：当前没有任务进程在运行，定时不会执行（单独运行 python -m monitor.personal_worker，只执行已授权的个人任务）');
+        parts.push('注意：当前没有任务进程在运行，定时不会执行（在工作区根目录执行 ./start_personal_worker.sh，只执行已授权的个人任务）');
       }
       parts.push(saved.auto_download ? '个人来源自动下载已授权（仅处理个人来源作品）' : '个人来源自动下载保持关闭');
       setSaveMsg({ ok: true, text: `已保存：${parts.join('；')}` });
@@ -200,8 +200,9 @@ export default function PersonalSourcePage() {
           {enabled && !status?.schedule_active ? (
             <p className="mt-1 text-warning">
               定时发现已开启但没有任何任务进程在运行。start_all.sh 只启动前后端、不含定时任务；
-              请单独运行个人任务进程：python -m monitor.personal_worker
-              （只执行已授权的个人同步/下载，不启动其他平台轮询）。
+              请在工作区根目录执行
+              <code className="mx-1 rounded bg-surface px-1 py-0.5 text-ink">./start_personal_worker.sh</code>
+              （使用项目 .venv 解释器，只执行已授权的个人同步/下载，不启动其他平台轮询）。
             </p>
           ) : null}
         </div>

@@ -211,25 +211,33 @@ def is_personal_worker_online() -> bool:
 
 
 def count_download_locks(db: Session) -> int:
-    """个人来源下载积压数：NEW/QUEUED 且被个人来源事实覆盖的作品数（按作品去重）。"""
+    """个人来源下载积压数（按作品去重）。
+
+    - NEW/QUEUED 且被个人来源事实覆盖：待下载；
+    - DOWNLOADING 且被个人来源事实覆盖：进行中/中断（异常退出留下的过期认领
+      由下载步骤安全恢复；无认领戳的按中断状态如实显示，不冒充已完成）。
+    """
     from app.models import PersonalSourceFolderItem, PersonalSourceMark, Work
     from sqlalchemy import exists, func, or_, select
 
-    return int(
-        db.execute(
-            select(func.count())
-            .select_from(Work)
-            .where(Work.status.in_(["NEW", "QUEUED"]))
-            .where(
-                or_(
-                    Work.source_type == "personal_source",
-                    exists().where(PersonalSourceMark.work_id == Work.id),
-                    exists().where(PersonalSourceFolderItem.work_id == Work.id),
-                )
-            )
-        ).scalar()
-        or 0
+    personal_facts = or_(
+        Work.source_type == "personal_source",
+        exists().where(PersonalSourceMark.work_id == Work.id),
+        exists().where(PersonalSourceFolderItem.work_id == Work.id),
     )
+    pending = (
+        select(func.count())
+        .select_from(Work)
+        .where(Work.status.in_(["NEW", "QUEUED"]))
+        .where(personal_facts)
+    )
+    interrupted = (
+        select(func.count())
+        .select_from(Work)
+        .where(Work.status == "DOWNLOADING")
+        .where(personal_facts)
+    )
+    return int(db.execute(pending).scalar() or 0) + int(db.execute(interrupted).scalar() or 0)
 
 
 def status(db: Session) -> dict:

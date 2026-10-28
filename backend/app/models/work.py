@@ -52,6 +52,10 @@ class Work(Base):
     )
     retry_count: Mapped[int] = mapped_column(nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v0.7：个人来源下载的跨进程原子认领（认领时间 + 认领进程 PID）。
+    # DOWNLOADING 且认领过期/进程已死才可安全恢复；NULL 表示非认领（既有全局流水线）。
+    download_claimed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    download_claim_pid: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=now_iso)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False, default=now_iso, onupdate=now_iso)
 

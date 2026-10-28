@@ -58,16 +58,20 @@ def test_tags_list_and_works_by_tag(client, auth_headers, db):
         published_at="2026-08-22T08:00:00Z", source_type="monitor", status="UNCLASSIFIED",
     )
     db.commit()
-    tag_entity = tag_repo.create(db, "美联储", kind="small")
+    # 测试库跨文件复用：先用唯一名避免与其他用例的 tags UNIQUE 冲突（乱序运行也要通过）
+    import uuid as _uuid
+
+    tag_name = f"美联储-{_uuid.uuid4().hex[:8]}"
+    tag_entity = tag_repo.create(db, tag_name, kind="small")
     tag_repo.link_work(db, work.id, tag_entity.id)
     db.commit()
 
     resp = client.get("/api/v1/tags?kind=small", headers=auth_headers)
     assert resp.status_code == 200
-    tag_item = next(t for t in resp.json()["data"]["items"] if t["name"] == "美联储")
+    tag_item = next(t for t in resp.json()["data"]["items"] if t["name"] == tag_name)
     assert tag_item["work_count"] >= 1
 
-    resp = client.get("/api/v1/tags/美联储/works", headers=auth_headers)
+    resp = client.get(f"/api/v1/tags/{tag_name}/works", headers=auth_headers)
     assert resp.status_code == 200
     assert resp.json()["data"]["total"] >= 1
 

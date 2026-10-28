@@ -315,19 +315,102 @@ def personal_source_download_locks(db: Session) -> int:
     return personal_source_service.count_download_locks(db)
 
 
+def _work_has_personal_facts(db: Session, work_id: int) -> bool:
+    """作品是否被个人来源事实覆盖（点赞/收藏标记或收藏夹归属）。"""
+    from app.models import PersonalSourceFolderItem, PersonalSourceMark
+    from sqlalchemy import exists, select as _select
+
+    has_mark = db.execute(
+        _select(exists().where(PersonalSourceMark.work_id == work_id))
+    ).scalar()
+    has_folder_item = db.execute(
+        _select(exists().where(PersonalSourceFolderItem.work_id == work_id))
+    ).scalar()
+    return bool(has_mark or has_folder_item)
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 进程存在但属其他用户：视为存活
+
+
+def _claim_stale(claimed_at: str | None, claimed_pid: int | None) -> bool:
+    """认领是否可安全恢复：认领进程已死，或认领时间超过超时分钟数。"""
+    from app.services import personal_source_service
+    from app.utils.timeutil import parse_iso
+
+    if not claimed_at and not claimed_pid:
+        return False  # 非认领（既有全局流水线路径），不归个人恢复管
+    if not _pid_alive(claimed_pid):
+        return True
+    claimed = parse_iso(claimed_at)
+    if claimed is None:
+        return True
+    age_minutes = (datetime.now(timezone.utc) - claimed).total_seconds() / 60
+    return age_minutes > settings.personal_download_claim_timeout_minutes
+
+
+def _claim_personal_work(db: Session, work_id: int) -> bool:
+    """跨进程原子认领：NEW/QUEUED → DOWNLOADING + 认领戳。单条 UPDATE，成功者唯一。"""
+    from sqlalchemy import update
+
+    result = db.execute(
+        update(Work)
+        .where(Work.id == work_id, Work.status.in_(["NEW", "QUEUED"]))
+        .values(status="DOWNLOADING", download_claimed_at=now_iso(), download_claim_pid=os.getpid())
+    )
+    db.commit()
+    return result.rowcount > 0
+
+
+def _recover_stale_claim(db: Session, work_id: int) -> bool:
+    """恢复过期认领：DOWNLOADING + 认领过期/进程已死 → QUEUED（可再认领）。"""
+    from sqlalchemy import update
+
+    result = db.execute(
+        update(Work)
+        .where(
+            Work.id == work_id,
+            Work.status == "DOWNLOADING",
+            Work.download_claimed_at.isnot(None) | Work.download_claim_pid.isnot(None),
+        )
+        .values(status="QUEUED", download_claimed_at=None, download_claim_pid=None)
+    )
+    db.commit()
+    return result.rowcount > 0
+
+
+def _authorization_granted() -> bool:
+    """每次认领前实时读取授权开关（跨进程变更即时生效）。"""
+    from app.services import personal_source_service
+
+    with SessionLocal() as db:
+        return personal_source_service.read_config(db).auto_download
+
+
 def download_personal_source_works(*, limit: int = 10) -> int:
     """个人来源自动下载（独立授权开关控制，默认关）。
 
-    授权在函数内部再次校验：douyin_personal_auto_download 关闭时零处理，
-    任何调用方都无法绕过。
+    授权在挑选整批时与**每次认领前**都会实时校验：关闭后不再开始任何未认领
+    作品（已在进行中的下载按其原有流程走完，不中途丢弃）。
 
-    只处理**个人来源事实覆盖**的作品（按作品去重，EXISTS 判定）：
+    只处理**个人来源事实覆盖**的作品（EXISTS 判定，按作品去重）：
     - source_type=personal_source（F2/DDR 登记，含夹内-only 作品）；
-    - 被 personal_source_marks 关联（点赞/收藏事实，跨来源或同来源）；
+    - 被 personal_source_marks 关联（点赞/收藏事实）；
     - 被 personal_source_folder_items 关联（仅收藏夹归属的跨来源作品）。
-    状态含 NEW 与 QUEUED：监控来源登记的作品会被置 QUEUED，全局队列关闭时
-    由本步骤在授权下继续处理。下载任务来源决定兜底策略：本步骤**一律禁用**
-    浏览器播放兜底，失败如实标记。绝不触碰其他来源的队列。
+    状态含 NEW / QUEUED / （过期认领的）DOWNLOADING：
+    - 认领通过单条 UPDATE 原子完成，跨进程并发只有一个赢家；
+    - DOWNLOADING 且认领进程已死/认领超时 → 先安全恢复为 QUEUED 再认领；
+      无认领戳的 DOWNLOADING（既有全局流水线路径）不做恢复、如实计入积压。
+    下载任务来源决定兜底策略：本步骤**一律禁用**浏览器播放兜底，失败如实标记。
+    绝不触碰其他来源的队列。
     """
     from app.models import PersonalSourceFolderItem, PersonalSourceMark
     from app.services import personal_source_service
@@ -337,6 +420,22 @@ def download_personal_source_works(*, limit: int = 10) -> int:
         config = personal_source_service.read_config(db)
         if not config.auto_download:
             return 0
+        stale_interrupted = db.execute(
+            select(Work.id)
+            .where(Work.status == "DOWNLOADING")
+            .where(
+                or_(
+                    Work.source_type == "personal_source",
+                    exists().where(PersonalSourceMark.work_id == Work.id),
+                    exists().where(PersonalSourceFolderItem.work_id == Work.id),
+                )
+            )
+        ).scalars().all()
+        for work_id in stale_interrupted:
+            work = db.get(Work, work_id)
+            if work is not None and _claim_stale(work.download_claimed_at, work.download_claim_pid):
+                _recover_stale_claim(db, work_id)
+                logger.info("个人来源下载：恢复过期认领 work_id=%s", work_id)
         selected = db.execute(
             select(Work.id)
             .where(Work.status.in_(["NEW", "QUEUED"]))
@@ -353,11 +452,16 @@ def download_personal_source_works(*, limit: int = 10) -> int:
 
     processed = 0
     for work_id in selected:
+        # 每次认领前实时复查授权：跨进程关闭后不再开始新作品
+        if not _authorization_granted():
+            logger.info("个人来源自动下载：授权已关闭，本批剩余作品不再开始")
+            break
         with SessionLocal() as db:
-            # 处理前重读状态：全局流水线或重试可能已改变它，避免重复处理
             work = db.get(Work, work_id)
             if work is None or work.status not in ("NEW", "QUEUED"):
-                continue
+                continue  # 已被其他进程处理/状态变化
+            if not _claim_personal_work(db, work_id):
+                continue  # 原子认领失败 = 其他进程已认领
             try:
                 _process_work(db, work, write_pending=True, allow_browser_fallback=False)
                 db.commit()
@@ -389,25 +493,22 @@ def check_douyin_personal_sync() -> None:
     """个人来源定时任务 tick：同步到期间隔执行；下载积压每个 tick 都消费。
 
     配置由前端 /api/v1/personal-source/schedule 维护，默认全关、不会隐式启动。
-    同步与下载是两项独立授权（enabled / auto_download），互不牵制：
-    - 同步到期判断基于最近一次同步（含失败）的开始时间，手动同步也计入，避免重叠；
-      并发兜底依赖 F2 取数脚本的文件锁。
-    - 下载积压每个 tick 消费一小批（默认 10），不随同步间隔排队——手动同步
-      （--download）也会即时消费。
-    - 同步失败不影响已授权积压的消费（失败如实记录，不让调度线程死亡）。
-    日志只记数量与类别，不写作品/收藏夹/账号标识。
+    同步与下载是两项独立授权（enabled / auto_download），**异常也相互隔离**：
+    同步抛错只记录并继续进入下载消费，不会跳过已授权的积压处理。
+    日志只记数量与类别（error_type），不写原始异常文本/作品/收藏夹/账号标识。
     """
     from app.services import personal_source_service
     from app.utils.timeutil import parse_iso
     from monitor import personal_source_ingest
 
-    try:
-        with SessionLocal() as db:
-            config = personal_source_service.read_config(db)
-        if not (config.enabled or config.auto_download):
-            return
-        if config.enabled:
-            due = True
+    with SessionLocal() as db:
+        config = personal_source_service.read_config(db)
+    if not (config.enabled or config.auto_download):
+        return
+
+    if config.enabled:
+        due = True
+        try:
             with SessionLocal() as db:
                 last_started = personal_source_service.last_sync_started_at(db)
             if last_started:
@@ -425,13 +526,16 @@ def check_douyin_personal_sync() -> None:
                     report.works_created, report.marks_created, report.folder_items_created,
                     len(report.incomplete_lists),
                 )
-        if config.auto_download:
+        except Exception as exc:  # noqa: BLE001 - 同步失败只记录安全类别，不阻塞下载
+            logger.warning("个人来源定时同步失败: error_type=%s", type(exc).__name__)
+
+    if config.auto_download:
+        try:
             processed = download_personal_source_works()
             if processed:
                 logger.info("个人来源自动下载处理 %s 个作品", processed)
-    except Exception as exc:  # noqa: BLE001 - 同步失败只记录，不中断调度
-        logger.warning("个人来源定时任务失败: error_type=%s detail=%s",
-                       type(exc).__name__, str(exc)[:160])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("个人来源自动下载失败: error_type=%s", type(exc).__name__)
 
 
 def consume_triggers() -> None:
@@ -582,12 +686,15 @@ def download_and_checkpoint(
     The checkpoint commit occurs before the independent sync call. Callers may
     safely begin transcription only after this function returns.
 
-    ``allow_browser_fallback=None`` 按作品 source_type 推断（个人来源禁用）；
-    显式传入时以调用方的**下载任务来源**为准（如个人来源同步步骤对跨来源
-    去重的旧作品也必须禁用浏览器兜底）。
+    ``allow_browser_fallback=None`` 按**作品事实**推断：个人来源作品或被
+    个人来源事实（点赞/收藏标记、收藏夹归属）覆盖的作品一律禁用——跨来源
+    去重后 source_type 仍是 monitor 的作品同样禁用；显式传入时以调用方的
+    **下载任务来源**为准（个人来源同步步骤恒为 False）。
     """
     if allow_browser_fallback is None:
-        allow_browser_fallback = work.source_type != "personal_source"
+        allow_browser_fallback = work.source_type != "personal_source" and not _work_has_personal_facts(
+            db, work.id
+        )
     resolution, existing_entry = _resolve_work_metadata(db, work)
     publication = resolution.publication_provenance() or publication_provenance_from_work(work)
     source_context = resolution.as_metadata()
@@ -729,6 +836,8 @@ def run_pipeline() -> None:
     source_type=personal_source 且状态 NEW 的作品**不在这里处理**：个人来源作品
     的自动下载由独立的授权开关（douyin_personal_auto_download）与专用步骤负责，
     避免个人来源同步隐式启动/扩大全局下载队列。显式重试（QUEUED）仍走本流水线。
+    浏览器播放兜底按**作品事实**统一裁决：被个人来源事实覆盖的作品（含先由
+    博主监控登记、后被 F2 发现的跨来源作品）一律禁用，不因来源字段绕开策略。
     """
     if not settings.monitor_run_pipeline:
         return
@@ -740,9 +849,17 @@ def run_pipeline() -> None:
             .order_by(Work.id)
             .limit(10)
         ).scalars().all()
-        for work in works:
+        for selected in works:
+            # 处理前重读状态：个人下载步骤可能已原子认领（DOWNLOADING），避免双跑
+            work = db.get(Work, selected.id)
+            if work is None or work.status not in ("NEW", "QUEUED"):
+                continue
+            allow_browser_fallback = (
+                work.source_type != "personal_source"
+                and not _work_has_personal_facts(db, work.id)
+            )
             try:
-                _process_work(db, work, write_pending=True)
+                _process_work(db, work, write_pending=True, allow_browser_fallback=allow_browser_fallback)
                 db.commit()
             except PipelineOfflineError as exc:
                 failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "download"

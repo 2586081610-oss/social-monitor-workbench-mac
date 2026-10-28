@@ -81,6 +81,9 @@ def init_db(*, db_engine=None, session_factory=None, create_dirs: bool = True) -
         _ensure_column(conn, "works", "published_time_precision", "VARCHAR(20)")
         _ensure_column(conn, "works", "published_time_timezone", "VARCHAR(64)")
         _ensure_column(conn, "works", "metadata_checked_at", "TEXT")
+        # v0.7 迁移：个人来源下载的跨进程原子认领（幂等，老库补列）
+        _ensure_column(conn, "works", "download_claimed_at", "TEXT")
+        _ensure_column(conn, "works", "download_claim_pid", "INTEGER")
 
     with session_factory() as db:
         from app.repositories.health_repo import upsert_cookie
