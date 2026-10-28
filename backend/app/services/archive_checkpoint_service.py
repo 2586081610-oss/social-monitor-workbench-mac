@@ -575,8 +575,21 @@ def record_download_checkpoint(
         raise ValueError("media receipts require every original media file")
     elif str(work.content_type or "").lower() == "image":
         expected_urls = _media_urls(work)
-        if work.platform != "twitter" or not expected_urls or len(receipt_files) != len(expected_urls):
+        platform_supported = work.platform in {"twitter", "douyin"}
+        if (
+            not platform_supported
+            or not expected_urls
+            or len(receipt_files) != len(expected_urls)
+        ):
             raise ValueError("image receipt does not cover the complete supported album")
+        if work.platform == "douyin":
+            # 抖音图集：凭据文件必须为图片扩展名且一一对应（无重名）
+            names = {Path(item.path).name for item in receipt_files}
+            if len(names) != len(receipt_files) or any(
+                Path(item.path).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}
+                for item in receipt_files
+            ):
+                raise ValueError("image receipt does not cover the complete supported album")
 
     completed_at = getattr(result, "completed_at", None)
     download_provenance: dict[str, Any] = {"disposition": disposition}

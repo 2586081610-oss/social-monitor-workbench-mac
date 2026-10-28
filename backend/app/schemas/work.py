@@ -43,6 +43,8 @@ class Work(BaseModel):
     frame_count: int = 0
     retry_count: int = 0
     last_error: str | None
+    # DOWNLOADING 且无活跃认领：异常退出留下的中断态（页面据此提供安全重试提示）
+    download_interrupted: bool = False
     created_at: str
     updated_at: str
 

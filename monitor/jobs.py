@@ -342,36 +342,62 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def _claim_stale(claimed_at: str | None, claimed_pid: int | None) -> bool:
-    """认领是否可安全恢复：认领进程已死，或认领时间超过超时分钟数。"""
-    from app.services import personal_source_service
-    from app.utils.timeutil import parse_iso
+    """认领是否可安全自动恢复：**仅当认领进程已死亡**。
 
+    PID 存活的认领一律视为活跃（无论认领时长）——长时下载不能因超时被重置；
+    PID 复用造成的"假活"不会误恢复（安全方向），会以中断状态呈现并可手动重试。
+    无认领戳（既有全局流水线路径）不归个人恢复管。
+    """
     if not claimed_at and not claimed_pid:
-        return False  # 非认领（既有全局流水线路径），不归个人恢复管
-    if not _pid_alive(claimed_pid):
-        return True
-    claimed = parse_iso(claimed_at)
-    if claimed is None:
-        return True
-    age_minutes = (datetime.now(timezone.utc) - claimed).total_seconds() / 60
-    return age_minutes > settings.personal_download_claim_timeout_minutes
+        return False
+    return not _pid_alive(claimed_pid)
 
 
-def _claim_personal_work(db: Session, work_id: int) -> bool:
-    """跨进程原子认领：NEW/QUEUED → DOWNLOADING + 认领戳。单条 UPDATE，成功者唯一。"""
-    from sqlalchemy import update
+_AUTO_DOWNLOAD_SQL = (
+    "(SELECT value FROM app_settings WHERE key = 'douyin_personal_auto_download') = 'true'"
+)
 
+
+def _claim_work_for_processing(db: Session, work_id: int, *, personal: bool) -> bool:
+    """跨入口统一的跨进程原子认领：NEW/QUEUED → DOWNLOADING + 认领戳。
+
+    全局流水线、个人下载步骤、手动同步（--download）、重试后的处理共用本认领，
+    单条 UPDATE 保证并发下唯一赢家。``personal=True`` 时授权开关在同一原子语句内
+    校验——另一会话已提交关闭后，认领必然失败（关闭已提交即不会开始新作品）。
+    """
+    from sqlalchemy import text, update
+
+    conditions = [Work.id == work_id, Work.status.in_(["NEW", "QUEUED"])]
+    if personal:
+        conditions.append(text(_AUTO_DOWNLOAD_SQL))
     result = db.execute(
         update(Work)
-        .where(Work.id == work_id, Work.status.in_(["NEW", "QUEUED"]))
+        .where(*conditions)
         .values(status="DOWNLOADING", download_claimed_at=now_iso(), download_claim_pid=os.getpid())
+        .execution_options(synchronize_session=False)
     )
     db.commit()
     return result.rowcount > 0
 
 
-def _recover_stale_claim(db: Session, work_id: int) -> bool:
-    """恢复过期认领：DOWNLOADING + 认领过期/进程已死 → QUEUED（可再认领）。"""
+def _clear_claim(db: Session, work_id: int) -> None:
+    """成功/失败后清除认领元数据（DONE/FAILED 不应残留活跃认领信息）。"""
+    from sqlalchemy import update
+
+    db.execute(
+        update(Work)
+        .where(Work.id == work_id)
+        .values(download_claimed_at=None, download_claim_pid=None)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _recover_stale_claim(db: Session, work_id: int, observed_at: str | None, observed_pid: int | None) -> bool:
+    """CAS 恢复僵死认领：仅当 DB 中认领仍是观察到的旧值时重置为 QUEUED。
+
+    两个恢复者同时看到旧认领时，第一个恢复并重新认领后，第二个的旧观察
+    不再匹配新认领 → rowcount 0，不会重置活跃的新认领。
+    """
     from sqlalchemy import update
 
     result = db.execute(
@@ -379,36 +405,61 @@ def _recover_stale_claim(db: Session, work_id: int) -> bool:
         .where(
             Work.id == work_id,
             Work.status == "DOWNLOADING",
-            Work.download_claimed_at.isnot(None) | Work.download_claim_pid.isnot(None),
+            Work.download_claimed_at == observed_at if observed_at is not None else Work.download_claimed_at.is_(None),
+            Work.download_claim_pid == observed_pid if observed_pid is not None else Work.download_claim_pid.is_(None),
         )
         .values(status="QUEUED", download_claimed_at=None, download_claim_pid=None)
+        .execution_options(synchronize_session=False)
     )
     db.commit()
     return result.rowcount > 0
 
 
 def _authorization_granted() -> bool:
-    """每次认领前实时读取授权开关（跨进程变更即时生效）。"""
+    """批次级预检（授权的权威校验在认领语句内联执行）。"""
     from app.services import personal_source_service
 
     with SessionLocal() as db:
         return personal_source_service.read_config(db).auto_download
 
 
+def _safe_error_text(exc: Exception) -> str:
+    """失败持久化（works.last_error / 任务 stage error / API / 页面）用的安全文案。
+
+    白名单异常（PipelineOfflineError/TwitterImageError）的消息是人工维护的
+    固定文案，直接保留以便用户理解；其余异常只记类型 + 脱敏摘要——凭据、
+    账号/作品/收藏夹标识、URL 查询串不得进入 API 与页面。
+    """
+    if isinstance(exc, PipelineOfflineError):
+        return str(exc)
+    try:
+        from monitor.pipeline.twitter_image import TwitterImageError
+
+        if isinstance(exc, TwitterImageError):
+            return str(exc)
+    except ImportError:  # pragma: no cover
+        pass
+    from monitor.platforms.douyin_personal_source import redact_sensitive_text
+
+    return redact_sensitive_text(f"{type(exc).__name__}: {exc}", max_length=200)
+
+
 def download_personal_source_works(*, limit: int = 10) -> int:
     """个人来源自动下载（独立授权开关控制，默认关）。
 
-    授权在挑选整批时与**每次认领前**都会实时校验：关闭后不再开始任何未认领
-    作品（已在进行中的下载按其原有流程走完，不中途丢弃）。
+    授权校验在**认领语句内联原子执行**：另一进程已提交关闭后，认领必然失败，
+    不会开始新作品；已在进行中的下载按其原有流程走完，不中途丢弃。
 
     只处理**个人来源事实覆盖**的作品（EXISTS 判定，按作品去重）：
     - source_type=personal_source（F2/DDR 登记，含夹内-only 作品）；
     - 被 personal_source_marks 关联（点赞/收藏事实）；
     - 被 personal_source_folder_items 关联（仅收藏夹归属的跨来源作品）。
-    状态含 NEW / QUEUED / （过期认领的）DOWNLOADING：
-    - 认领通过单条 UPDATE 原子完成，跨进程并发只有一个赢家；
-    - DOWNLOADING 且认领进程已死/认领超时 → 先安全恢复为 QUEUED 再认领；
-      无认领戳的 DOWNLOADING（既有全局流水线路径）不做恢复、如实计入积压。
+    状态含 NEW / QUEUED / （僵死认领的）DOWNLOADING：
+    - 认领通过统一原子语句完成，跨进程并发只有一个赢家；
+    - DOWNLOADING 且认领进程已死 → 按观察到的旧认领 CAS 恢复为 QUEUED 再认领；
+      PID 存活的认领（无论时长）一律视为活跃，不自动恢复；
+      无认领戳的 DOWNLOADING（既有全局流水线路径）不恢复、如实计入积压并可通过
+      手动重试入口操作。
     下载任务来源决定兜底策略：本步骤**一律禁用**浏览器播放兜底，失败如实标记。
     绝不触碰其他来源的队列。
     """
@@ -420,8 +471,8 @@ def download_personal_source_works(*, limit: int = 10) -> int:
         config = personal_source_service.read_config(db)
         if not config.auto_download:
             return 0
-        stale_interrupted = db.execute(
-            select(Work.id)
+        interrupted = db.execute(
+            select(Work.id, Work.download_claimed_at, Work.download_claim_pid)
             .where(Work.status == "DOWNLOADING")
             .where(
                 or_(
@@ -430,12 +481,11 @@ def download_personal_source_works(*, limit: int = 10) -> int:
                     exists().where(PersonalSourceFolderItem.work_id == Work.id),
                 )
             )
-        ).scalars().all()
-        for work_id in stale_interrupted:
-            work = db.get(Work, work_id)
-            if work is not None and _claim_stale(work.download_claimed_at, work.download_claim_pid):
-                _recover_stale_claim(db, work_id)
-                logger.info("个人来源下载：恢复过期认领 work_id=%s", work_id)
+        ).all()
+        for work_id, claimed_at, claimed_pid in interrupted:
+            if _claim_stale(claimed_at, claimed_pid):
+                if _recover_stale_claim(db, work_id, claimed_at, claimed_pid):
+                    logger.info("个人来源下载：恢复僵死认领 work_id=%s", work_id)
         selected = db.execute(
             select(Work.id)
             .where(Work.status.in_(["NEW", "QUEUED"]))
@@ -452,25 +502,27 @@ def download_personal_source_works(*, limit: int = 10) -> int:
 
     processed = 0
     for work_id in selected:
-        # 每次认领前实时复查授权：跨进程关闭后不再开始新作品
+        # 批次级预检（权威校验在认领语句内联）：授权关闭则不再开始剩余作品
         if not _authorization_granted():
             logger.info("个人来源自动下载：授权已关闭，本批剩余作品不再开始")
             break
         with SessionLocal() as db:
             work = db.get(Work, work_id)
-            if work is None or work.status not in ("NEW", "QUEUED"):
-                continue  # 已被其他进程处理/状态变化
-            if not _claim_personal_work(db, work_id):
-                continue  # 原子认领失败 = 其他进程已认领
+            if work is None:
+                continue
+            if not _claim_work_for_processing(db, work_id, personal=True):
+                continue  # 授权已关闭 / 已被其他进程认领或处理
             try:
                 _process_work(db, work, write_pending=True, allow_browser_fallback=False)
+                _clear_claim(db, work_id)
                 db.commit()
                 processed += 1
             except PipelineOfflineError as exc:
                 failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "download"
                 work.status = "FAILED"
-                work.last_error = str(exc)
-                task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+                work.last_error = _safe_error_text(exc)
+                task_repo.mark_failed(db, work.id, failed_stage, _safe_error_text(exc))
+                _clear_claim(db, work_id)
                 db.commit()
                 logger.warning("personal-source work download offline: work_id=%s error_type=%s",
                                work.id, type(exc).__name__)
@@ -481,8 +533,9 @@ def download_personal_source_works(*, limit: int = 10) -> int:
                     "FRAME_EXTRACTING": "frames",
                 }.get(work.status, "pipeline")
                 work.status = "FAILED"
-                work.last_error = str(exc)
-                task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+                work.last_error = _safe_error_text(exc)
+                task_repo.mark_failed(db, work.id, failed_stage, _safe_error_text(exc))
+                _clear_claim(db, work_id)
                 db.commit()
                 logger.warning("personal-source work pipeline failed: work_id=%s error_type=%s",
                                work.id, type(exc).__name__)
@@ -659,6 +712,13 @@ def _pipeline_error_message(exc: Exception) -> str:
     if isinstance(exc, PipelineOfflineError):
         return str(exc)
     try:
+        from monitor.pipeline.douyin_images import DouyinImageError
+
+        if isinstance(exc, DouyinImageError):
+            return str(exc)  # 白名单/脱敏后的图集失败文案
+    except ImportError:
+        pass
+    try:
         from monitor.pipeline.twitter_image import TwitterImageError
 
         if isinstance(exc, TwitterImageError):
@@ -755,12 +815,19 @@ def download_and_checkpoint(
             )
             download_source = f"monitor.pipeline.download:{work.platform}"
         elif work.platform == "douyin":
-            # 抖音图文：尚无经验证的下载通道（Twitter 图片下载器不适用）。
-            # 如实失败，绝不路由到错误下载器，也绝不打开作品网页兜底。
-            raise PipelineOfflineError(
-                "douyin image posts are not supported for automatic download yet "
-                "(no verified downloader); the work stays registered but fails honestly"
+            # 抖音图集：F2 detail 只读接口取图片直链 + CDN 直取，全程不打开/播放
+            # 作品网页；失败走 DouyinImageError 的白名单/脱敏文案，如实标记。
+            from monitor.pipeline import douyin_images
+
+            images_dir = media_dir / "images"
+            manifest_path, result = douyin_images.download_douyin_images_with_result(
+                work,
+                images_dir,
+                registered_files=registered_files,
             )
+            download_source = "monitor.pipeline.douyin_images"
+            if manifest_path is not None:
+                work.frame_manifest_path = relative_path_from_root("media", str(manifest_path))
         else:
             from monitor.pipeline import twitter_image
 
@@ -850,24 +917,28 @@ def run_pipeline() -> None:
             .limit(10)
         ).scalars().all()
         for selected in works:
-            # 处理前重读状态：个人下载步骤可能已原子认领（DOWNLOADING），避免双跑
-            work = db.get(Work, selected.id)
-            if work is None or work.status not in ("NEW", "QUEUED"):
+            # 统一原子认领（与个人下载/手动同步/重试同一条语句）：
+            # identity map 中的旧状态不可信，认领以数据库为准，失败者跳过
+            if not _claim_work_for_processing(db, selected.id, personal=False):
                 continue
+            work = db.get(Work, selected.id)
+            work.status = "DOWNLOADING"  # 与认领后的数据库状态对齐（identity map 可能是旧值）
             allow_browser_fallback = (
                 work.source_type != "personal_source"
                 and not _work_has_personal_facts(db, work.id)
             )
             try:
                 _process_work(db, work, write_pending=True, allow_browser_fallback=allow_browser_fallback)
+                _clear_claim(db, work.id)
                 db.commit()
             except PipelineOfflineError as exc:
                 failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "download"
                 work.status = "FAILED"
-                work.last_error = str(exc)
-                task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+                work.last_error = _safe_error_text(exc)
+                task_repo.mark_failed(db, work.id, failed_stage, _safe_error_text(exc))
+                _clear_claim(db, work.id)
                 db.commit()
-                logger.warning("work %s 流水线离线: %s", work.id, exc)
+                logger.warning("work %s 流水线离线: error_type=%s", work.id, type(exc).__name__)
             except Exception as exc:  # noqa: BLE001
                 failed_stage = {
                     "DOWNLOADING": "download",
@@ -875,10 +946,11 @@ def run_pipeline() -> None:
                     "FRAME_EXTRACTING": "frames",
                 }.get(work.status, "pipeline")
                 work.status = "FAILED"
-                work.last_error = str(exc)
-                task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+                work.last_error = _safe_error_text(exc)
+                task_repo.mark_failed(db, work.id, failed_stage, _safe_error_text(exc))
+                _clear_claim(db, work.id)
                 db.commit()
-                logger.exception("work %s 流水线异常", work.id)
+                logger.warning("work %s 流水线异常: error_type=%s", work.id, type(exc).__name__)
 
 
 def _process_work(

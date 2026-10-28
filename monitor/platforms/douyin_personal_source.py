@@ -44,9 +44,10 @@ _COOKIE_HEADER_RE = re.compile(r"(?i)\bcookie\s*:\s*[^\r\n]+")
 _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}")
 # URL 查询串整体（携带 msToken/a_bogus 等签名参数，不逐键罗列）
 _URL_QUERY_RE = re.compile(r"\?[^'\"\s<>]+")
-# 本人 sec_uid 与较长收藏夹/作品标识（日志中一律不出现）
+# 本人 sec_uid 与较长数字标识（抖音作品/账号 ID 约 19 位数字，日志不出现）
 _SEC_UID_RE = re.compile(r"\bMS4wLjABAA[A-Za-z0-9_-]{8,}")
 _LONG_NUMERIC_ID_RE = re.compile(r"(?i)\b(folder)[:#]?\s*\d{10,}")
+_LONG_NUMBER_RE = re.compile(r"\b\d{15,}\b")
 
 
 def redact_sensitive_text(text: str, *, max_length: int = 300) -> str:
@@ -63,6 +64,7 @@ def redact_sensitive_text(text: str, *, max_length: int = 300) -> str:
     redacted = _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", redacted)
     redacted = _SEC_UID_RE.sub("<sec_uid>", redacted)
     redacted = _LONG_NUMERIC_ID_RE.sub(r"\1<id>", redacted)
+    redacted = _LONG_NUMBER_RE.sub("<long-id>", redacted)
     if len(redacted) > max_length:
         redacted = redacted[:max_length] + "…<截断>"
     return redacted

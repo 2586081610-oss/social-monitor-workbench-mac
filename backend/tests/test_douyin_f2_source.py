@@ -235,8 +235,29 @@ def arg_value(name, default=None):
 
 out = arg_value("--output")
 scopes = [s for s in (arg_value("--scopes", "") or "").split(",") if s]
+mode = arg_value("--mode", "list")
+aweme_id = arg_value("--aweme-id", "")
 # 测试钩子：F2_FAKE_INCOMPLETE=1 → collection / 夹 f1 标记不完整（验证 partial 传播）
 incomplete = os.environ.get("F2_FAKE_INCOMPLETE") == "1"
+
+if mode == "detail":
+    # detail 模式：合成图集详情（两张图片直链）；--aweme-id 含 "noimg" 时返回非图集
+    if "noimg" in aweme_id:
+        doc = {{"ok": False, "error": {{"kind": "not_image_post", "message": "作品详情未包含图片地址"}}}}
+    else:
+        doc = {{"ok": True, "detail": {{
+            "external_id": aweme_id,
+            "title": "合成图集",
+            "author": "测试作者",
+            "published_at": "2026-05-01T08:00:00Z",
+            "images": [
+                "https://cdn.example.test/p1.jpg",
+                "https://cdn.example.test/p2.jpg",
+            ],
+        }}}}
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False)
+    sys.exit(0)
 
 def _work(aweme_id):
     return {{"external_id": aweme_id, "title": f"作品{{aweme_id[-4:]}}", "author": "测试作者",

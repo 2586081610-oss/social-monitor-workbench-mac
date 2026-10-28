@@ -101,6 +101,8 @@ export interface Work {
   frame_count: number;
   retry_count: number;
   last_error: string | null;
+  /** DOWNLOADING 且无活跃认领：异常退出留下的中断态（可安全重试） */
+  download_interrupted?: boolean;
   created_at: string;
   updated_at: string;
 }

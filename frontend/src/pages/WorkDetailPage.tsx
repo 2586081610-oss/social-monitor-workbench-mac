@@ -159,6 +159,11 @@ export default function WorkDetailPage() {
             失败原因：{failedError}
           </div>
         ) : null}
+        {work.status === 'DOWNLOADING' && work.download_interrupted ? (
+          <div className="mt-3 rounded-md bg-warning-light px-3 py-2 text-sm text-warning">
+            下载中断（下载进程异常退出，未完成归档）。可点击"重试"重新入队；若确认另一进程仍在下载，请勿重试。
+          </div>
+        ) : null}
       </div>
 
       <section className="rounded-lg border border-line bg-surface p-4 shadow-card">

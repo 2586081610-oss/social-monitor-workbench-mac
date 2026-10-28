@@ -23,6 +23,9 @@ import pytest
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tests.test_douyin_f2_source import _make_fake_runtime  # noqa: E402
 
 from app.models import ArchiveEntry, PersonalSourceFolderItem, PersonalSourceMark, Work  # noqa: E402
 from app.repositories import app_setting_repo  # noqa: E402
@@ -492,40 +495,339 @@ def test_run_pipeline_excludes_new_personal_source_works(db, monkeypatch):
         _restore_works(db, original)
 
 
-def test_douyin_image_post_fails_honestly_end_to_end(db, monkeypatch):
-    """合成端到端：图文作品登记 → 下载 → 如实 FAILED，无归档、无浏览器兜底、无 Twitter 下载器。"""
-    from monitor import jobs
+def _png_bytes(seed: int) -> bytes:
+    import hashlib
 
-    work = Work(platform="douyin", external_id="8800031", title="抖音图文", url="u",
+    return b"\x89PNG\r\n\x1a\n" + hashlib.sha256(str(seed).encode()).digest() * 8
+
+
+def test_douyin_image_post_downloads_offline_end_to_end(db, monkeypatch, tmp_path):
+    """合成端到端：图集作品 → F2 detail（伪运行时）→ CDN 直取（打桩）→ 归档凭据落库。
+
+    全程无网页、无播放、无真实网络；下载凭据走既有 checkpoint 语义。
+    """
+    from monitor import jobs
+    from monitor.pipeline import douyin_images
+
+    work = Work(platform="douyin", external_id="9001234567890123456", title="抖音图集", url="u",
                 source_type="personal_source", content_type="image", status="NEW")
     db.add(work)
     db.commit()
 
-    def no_twitter(*args, **kwargs):
-        raise AssertionError("twitter image downloader must not be used for douyin image posts")
+    monkeypatch.setenv("F2_DOUYIN_COOKIE_FILE", str(tmp_path / "cookie.txt"))
+    (tmp_path / "cookie.txt").write_text("sessionid=synthetic", encoding="utf-8")
+    monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
+    monkeypatch.setattr(douyin_images, "fetch_url_bytes",
+                        lambda url, **kw: _png_bytes(len(url)))
 
-    def no_browser(*args, **kwargs):
-        raise AssertionError("browser fallback must not be used")
+    from pathlib import Path as _Path
+    from app.utils.timeutil import now_iso as _now
+    work.published_at = "2026-05-01T08:00:00Z"
+    work.published_time_source = "douyin_web_create_time"
+    work.published_time_precision = "second"
+    work.published_time_timezone = "UTC"
+    db.commit()
 
-    monkeypatch.setattr("monitor.pipeline.twitter_image.download_images_with_result", no_twitter)
-    monkeypatch.setattr("monitor.pipeline.download._download_douyin_browser", no_browser, raising=False)
+    checkpoint = jobs.download_and_checkpoint(db, work)
+    db.refresh(work)
+    assert checkpoint.result.disposition == "downloaded"
+    assert all(item.media_type == "image" for item in checkpoint.result.files)
+    assert work.media_path and work.downloaded_at and work.download_time_source
+    from app.models import ArchiveEntry, Task
+    assert db.query(ArchiveEntry).filter_by(external_id=work.external_id).count() >= 1
+    assert db.query(Task).filter_by(work_id=work.id, stage="download", status="succeeded").count() == 1
+    # 第二次运行：manifest 源 URL 一致 + 登记文件 size/sha 校验通过 → 复用而非重复下载
+    checkpoint2 = jobs.download_and_checkpoint(db, work)
+    assert checkpoint2.result.disposition == "reused"
+
+
+def test_douyin_image_post_partial_failure_is_honest(db, monkeypatch, tmp_path):
+    """部分图片下载失败 → 如实 FAILED，无下载凭据、无归档；错误文案不含内部细节。"""
+    from monitor import jobs
+    from monitor.pipeline import douyin_images
+
+    work = Work(platform="douyin", external_id="9001234567890123457", title="抖音图集", url="u",
+                source_type="personal_source", content_type="image", status="NEW")
+    db.add(work)
+    db.commit()
+    monkeypatch.setenv("F2_DOUYIN_COOKIE_FILE", str(tmp_path / "cookie.txt"))
+    (tmp_path / "cookie.txt").write_text("sessionid=synthetic", encoding="utf-8")
+    monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
+
+    def flaky(url, **kw):
+        if url.endswith("p2.jpg"):
+            raise douyin_images.DouyinImageError("图片 CDN 返回 HTTP 403")
+        return _png_bytes(len(url))
+
+    monkeypatch.setattr(douyin_images, "fetch_url_bytes", flaky)
     try:
-        jobs._process_work(db, work, write_pending=False, allow_browser_fallback=False)
-        raise AssertionError("expected PipelineOfflineError")
+        jobs.download_and_checkpoint(db, work)
+        raise AssertionError("expected failure")
     except jobs.PipelineOfflineError as exc:
-        assert "douyin image" in str(exc)
+        assert "403" in str(exc)
         db.rollback()
         failed = db.get(Work, work.id)
         failed.status = "FAILED"
-        failed.last_error = str(exc)
+        failed.last_error = "图片 CDN 返回 HTTP 403"
         db.commit()
-        assert db.query(ArchiveEntry).filter_by(external_id="8800031").count() == 0
+        from app.models import ArchiveEntry, Task
+        assert db.query(Task).filter_by(work_id=work.id, stage="download", status="succeeded").count() == 0
+
+
+def test_global_and_personal_workers_process_same_work_only_once(db, monkeypatch, clean_settings):
+    """全局流水线与个人 worker 并发：统一原子认领保证同一作品只处理一次。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9400001", title="synthetic", url="u",
+                source_type="monitor", content_type="video", status="QUEUED")
+    db.add(work)
+    db.flush()
+    db.add(PersonalSourceMark(platform="douyin", external_id="9400001", source_mark="like",
+                              source_channel="f2", snapshot_id="synthetic", first_seen_at=now_iso(),
+                              last_seen_at=now_iso(), work_id=work.id))
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    monkeypatch.setattr(jobs.settings, "monitor_run_pipeline", True)
+    original = _quarantine_other_works(db, {"9400001"})
+    global_started = Event()
+    personal_done = Event()
+    calls: list[str] = []
+
+    def fake_has_facts(db_, work_id):
+        global_started.set()
+        assert personal_done.wait(timeout=5)
+        return True
+
+    def fake_process(db_, w, **kwargs):
+        calls.append(current_thread().name)
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_work_has_personal_facts", fake_has_facts)
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    try:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="global") as pool:
+            future = pool.submit(jobs.run_pipeline)
+            assert global_started.wait(timeout=5)
+            try:
+                jobs.download_personal_source_works()
+            finally:
+                personal_done.set()
+            future.result(timeout=5)
+        assert len(calls) == 1, f"calls={calls}"
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        for mark in db.query(PersonalSourceMark).filter_by(external_id="9400001").all():
+            db.delete(mark)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_active_long_download_is_not_recovered(db, monkeypatch, clean_settings):
+    """PID 存活的认领即使超过超时也不得自动恢复（长下载保护）。"""
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    from monitor import jobs
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    work = Work(platform="douyin", external_id="9400002", title="x", url="u",
+                source_type="personal_source", content_type="video", status="DOWNLOADING",
+                download_claimed_at=old, download_claim_pid=os.getpid())
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9400002"})
+    calls: list[str] = []
+    monkeypatch.setattr(jobs, "_process_work", lambda db_, w, **kw: calls.append(w.id))
+    try:
+        jobs.download_personal_source_works()
+        assert calls == [], f"active process download restarted: {len(calls)}"
     finally:
         row = db.get(Work, work.id)
         if row is not None:
             db.delete(row)
         db.commit()
+        _restore_works(db, original)
 
+
+def test_stale_recovery_cannot_reset_a_new_claim(db, clean_settings):
+    """CAS 恢复：旧观察不得重置他人已建立的新认领。"""
+    from datetime import datetime, timedelta, timezone
+
+    from monitor import jobs
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    work = Work(platform="douyin", external_id="9400003", title="x", url="u",
+                source_type="personal_source", content_type="video", status="DOWNLOADING",
+                download_claimed_at=old, download_claim_pid=999999999)
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")  # 重新认领需内联授权通过
+    work_id = work.id
+    with jobs.SessionLocal() as first, jobs.SessionLocal() as second:
+        stale1 = first.get(Work, work_id)
+        stale2 = second.get(Work, work_id)
+        assert jobs._claim_stale(stale1.download_claimed_at, stale1.download_claim_pid)
+        assert jobs._claim_stale(stale2.download_claimed_at, stale2.download_claim_pid)
+        # 先捕获"当时观察到的旧认领"（rollback 会过期 identity map，之后再读会拿到新值）
+        obs1 = (stale1.download_claimed_at, stale1.download_claim_pid)
+        obs2 = (stale2.download_claimed_at, stale2.download_claim_pid)
+        first.rollback()
+        second.rollback()
+        assert jobs._recover_stale_claim(first, work_id, *obs1)
+        assert jobs._claim_work_for_processing(first, work_id, personal=True)
+        reset_new_claim = jobs._recover_stale_claim(second, work_id, *obs2)
+    assert not reset_new_claim, "second stale observer reset an active new claim"
+
+
+def test_closing_authorization_before_claim_stops_new_work(db, monkeypatch, clean_settings):
+    """授权读取返回 True 后、认领前另一会话关闭开关 → 原子认领必须失败。"""
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9400004", title="x", url="u",
+                source_type="personal_source", content_type="video", status="NEW")
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9400004"})
+    real_check = jobs._authorization_granted
+
+    def revoke_after_check():
+        granted = real_check()
+        with jobs.SessionLocal() as other:
+            _set(other, AUTO_DOWNLOAD_KEY, "false")
+        return granted
+
+    calls: list[str] = []
+
+    def fake_process(db_, w, **kw):
+        calls.append(w.id)
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_authorization_granted", revoke_after_check)
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    try:
+        jobs.download_personal_source_works()
+        assert calls == [], "work started after authorization was switched off"
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_unclaimed_interrupted_work_can_be_retried(client, auth_headers, db, clean_settings):
+    """无认领的中断下载可经重试入口安全恢复；活跃认领返回 409。"""
+    work = Work(platform="douyin", external_id="9400005", title="x", url="u",
+                source_type="personal_source", content_type="video", status="DOWNLOADING")
+    db.add(work)
+    db.commit()
+    resp = client.post(f"/api/v1/works/{work.id}/retry", headers=auth_headers)
+    assert resp.status_code == 200, f"actual response status={resp.status_code}"
+
+    # 活跃认领（当前进程存活）→ 409
+    import os
+
+    active = Work(platform="douyin", external_id="9400005b", title="y", url="u2",
+                  source_type="personal_source", content_type="video", status="DOWNLOADING",
+                  download_claimed_at=now_iso(), download_claim_pid=os.getpid())
+    db.add(active)
+    db.commit()
+    resp2 = client.post(f"/api/v1/works/{active.id}/retry", headers=auth_headers)
+    assert resp2.status_code == 409
+    # 清理
+    for wid in (work.id, active.id):
+        row = db.get(Work, wid)
+        if row is not None:
+            db.delete(row)
+    db.commit()
+
+
+def test_download_failure_does_not_expose_token_in_work_api(client, auth_headers, db, monkeypatch, clean_settings):
+    """失败持久化全链路安全：works.last_error 与 stages[].error 不含原始异常文本。"""
+    from monitor import jobs
+
+    work = Work(platform="douyin", external_id="9400006", title="x", url="u",
+                source_type="personal_source", content_type="video", status="NEW")
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9400006"})
+    secret = "FAKESECRETVALUENOTREAL"
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("Authorization: Bearer " + secret)
+
+    monkeypatch.setattr(jobs, "_process_work", boom)
+    try:
+        jobs.download_personal_source_works()
+        db.expire_all()  # 个人步骤在其他会话提交：过期本会话 identity map 再读
+        row = db.get(Work, work.id)
+        assert row.status == "FAILED"
+        response = client.get(f"/api/v1/works/{work.id}", headers=auth_headers)
+        assert response.status_code == 200
+        assert secret not in response.text, "synthetic token exposed in work detail API"
+        detail = response.json()["data"]
+        assert detail["last_error"] and "RuntimeError" in detail["last_error"]  # 类型保留，可诊断
+        assert "<redacted>" in detail["last_error"]  # 凭据值已脱敏（原始令牌与 Bearer 字样均不出现）
+        assert "Bearer" not in detail["last_error"] and secret not in detail["last_error"]
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_claim_metadata_cleared_after_completion_and_failure(db, monkeypatch, clean_settings):
+    """成功与失败后认领元数据清空（DONE/FAILED 不残留活跃认领）。"""
+    from monitor import jobs
+
+    ok_work = Work(platform="douyin", external_id="9400007", title="x", url="u",
+                   source_type="personal_source", content_type="video", status="NEW")
+    fail_work = Work(platform="douyin", external_id="9400008", title="y", url="u2",
+                     source_type="personal_source", content_type="video", status="NEW")
+    db.add_all([ok_work, fail_work])
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9400007", "9400008"})
+    seq = {"n": 0}
+
+    def fake_process(db_, w, **kw):
+        seq["n"] += 1
+        if seq["n"] == 2:
+            raise RuntimeError("synthetic failure")
+        w.status = "DONE"
+
+    monkeypatch.setattr(jobs, "_process_work", fake_process)
+    try:
+        jobs.download_personal_source_works()
+        from app.utils.timeutil import now_iso as _n
+        assert db.get(Work, ok_work.id).download_claimed_at is None
+        assert db.get(Work, fail_work.id).download_claimed_at is None
+    finally:
+        for wid in (ok_work.id, fail_work.id):
+            row = db.get(Work, wid)
+            if row is not None:
+                db.delete(row)
+        db.commit()
+        _restore_works(db, original)
+
+
+def test_redaction_covers_bearer_before_param_rule():
+    """脱敏顺序回归：Authorization: Bearer <token> 的令牌必须消失。"""
+    from monitor.platforms.douyin_personal_source import redact_sensitive_text
+
+    out = redact_sensitive_text("Authorization: Bearer FAKESECRETVALUENOTREAL")
+    assert "FAKESECRETVALUENOTREAL" not in out
+    out = redact_sensitive_text("作品 9001234567890123456 无法获取 msToken=FAKETOKEN")
+    assert "9001234567890123456" not in out and "FAKETOKEN" not in out
 
 def _table_count(path: Path) -> int:
     with sqlite3.connect(path) as con:

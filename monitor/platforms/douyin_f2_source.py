@@ -208,6 +208,85 @@ def parse_f2_result(
     return snapshot
 
 
+def read_aweme_detail(
+    aweme_id: str,
+    *,
+    runtime_dir: str | os.PathLike | None = None,
+    cookie_file: str | os.PathLike | None = None,
+    budget_seconds: int = 120,
+) -> dict:
+    """单作品详情（图文下载用）：运行 F2 detail 模式并返回白名单字段。
+
+    只调用 aweme/detail 只读接口，不打开/播放作品网页。返回
+    {"external_id", "title", "author", "published_at", "images": [url...]}。
+    失败 kind：login_required / runtime_missing / login_expired /
+    not_image_post / platform_error / timeout 等。
+    """
+    cookie_path = resolve_cookie_file(cookie_file)
+    if not cookie_path.is_file():
+        raise PersonalSourceError(
+            "login_required",
+            f"未找到抖音登录态文件: {cookie_path}（设置 {COOKIE_FILE_ENV} 或先由用户完成登录导出）",
+        )
+    runtime = resolve_runtime_dir(runtime_dir)
+    python = runtime_python(runtime)
+    script = Path(__file__).resolve().parent / "f2_fetch.py"
+
+    workspace_root = Path(__file__).resolve().parents[2]
+    log_dir = Path(os.getenv("WORKBUDDY_DIR") or (workspace_root / "workbuddy")) / "f2"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "detail.log"
+
+    output_path = Path(tempfile.mkdtemp(prefix="f2-detail-")) / "detail.json"
+    cmd = [
+        str(python),
+        str(script),
+        "--mode", "detail",
+        "--aweme-id", str(aweme_id),
+        "--cookie-file", str(cookie_path),
+        "--output", str(output_path),
+        "--budget-seconds", str(budget_seconds),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(workspace_root),
+            capture_output=True,
+            text=True,
+            timeout=budget_seconds + 60,
+        )
+        try:
+            combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+            log_path.write_text(redact_sensitive_text(combined, max_length=20000), encoding="utf-8")
+        except OSError:
+            pass
+        if not output_path.is_file():
+            raise PersonalSourceError("runtime_missing", f"F2 详情取数未产出结果文件（日志: {log_path}）")
+        try:
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise PersonalSourceError("invalid_json", f"F2 详情结果不是有效 JSON（日志: {log_path}）") from None
+    except subprocess.TimeoutExpired:
+        raise PersonalSourceError("timeout", f"F2 详情取数超出时间预算 {budget_seconds}s") from None
+    finally:
+        try:
+            output_path.unlink(missing_ok=True)
+            output_path.parent.rmdir()
+        except OSError:
+            pass
+
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        error = result.get("error") if isinstance(result, dict) and isinstance(result.get("error"), dict) else {}
+        raise PersonalSourceError(
+            _clean_str(error.get("kind")) or "platform_error",
+            redact_sensitive_text(_clean_str(error.get("message")) or "F2 详情取数失败"),
+        )
+    detail = result.get("detail")
+    if not isinstance(detail, dict) or not _clean_str(detail.get("external_id")):
+        raise PersonalSourceError("invalid_json", "F2 详情结果缺少作品身份")
+    return detail
+
+
 def read_snapshot_f2(
     *,
     runtime_dir: str | os.PathLike | None = None,

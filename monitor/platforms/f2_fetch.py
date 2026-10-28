@@ -57,7 +57,10 @@ class ScopeError(Exception):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="F2 本人抖音列表只读取数")
+    parser = argparse.ArgumentParser(description="F2 本人抖音列表/作品详情只读取数")
+    parser.add_argument("--mode", choices=["list", "detail"], default="list",
+                        help="list=本人列表（点赞/收藏/收藏夹）；detail=单作品详情（图文下载用）")
+    parser.add_argument("--aweme-id", default="", help="detail 模式的作品 ID")
     parser.add_argument("--cookie-file", required=True, help="登录态 cookie 文本文件（不回显）")
     parser.add_argument("--output", required=True, help="结果 JSON 输出路径")
     parser.add_argument(
@@ -506,6 +509,73 @@ def write_output(path: str, doc: dict) -> None:
     os.replace(tmp, target)
 
 
+def run_detail(args: argparse.Namespace) -> dict:
+    """单作品详情（图文下载的数据来源）：只调 aweme/detail 只读接口，不打开网页。
+
+    同步函数（内部自管事件循环，调用方需在工作线程中执行）。
+    输出白名单字段：作品身份、图片 CDN 地址列表、标题、作者、发布时间。
+    失败语义与列表模式一致（kind 明确，绝不伪装成功）。
+    """
+    cookie = Path(args.cookie_file).read_text(encoding="utf-8").strip()
+    if not cookie:
+        raise ScopeError("login_expired", "cookie 文件为空")
+    aweme_id = (args.aweme_id or "").strip()
+    if not aweme_id:
+        raise ScopeError("bad_request", "detail 模式需要 --aweme-id")
+
+    try:
+        from f2.apps.douyin.handler import DouyinHandler
+    except Exception as exc:  # pragma: no cover
+        raise ScopeError("runtime_missing", f"F2 运行时不可用：{redact_sensitive_text(str(exc), max_length=160)}") from None
+
+    _silence_f2_output()
+    handler = DouyinHandler({
+        "headers": {"User-Agent": _USER_AGENT},
+        "cookie": cookie,
+        "timeout": args.timeout,
+        "max_retries": args.max_retries,
+        "proxies": {"http://": None, "https://": None},
+    })
+
+    async def _fetch() -> dict:
+        try:
+            page = await handler.fetch_one_video(aweme_id)
+        except ScopeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 统一翻译（删除/私密/接口异常），消息不含作品 ID
+            raise scope_error_from_exception(exc, "作品详情", "detail") from None
+        raw = page._to_raw()
+        status_error = _payload_status_kind(page.status_code)
+        if status_error is not None:
+            raise ScopeError(status_error[0], f"作品详情 {status_error[1]}")
+        detail = raw.get("aweme_detail") if isinstance(raw, dict) else None
+        if not isinstance(detail, dict):
+            raise ScopeError("platform_error", "作品详情响应缺少 aweme_detail 字段")
+        images: list[str] = []
+        rows = detail.get("images") if isinstance(detail.get("images"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url_list = row.get("url_list")
+            if isinstance(url_list, list) and url_list and isinstance(url_list[0], str):
+                images.append(url_list[0])
+        author = detail.get("author") if isinstance(detail.get("author"), dict) else {}
+        return {
+            "external_id": str(detail.get("aweme_id") or "").strip(),
+            "title": (detail.get("desc") or "").strip() or None,
+            "author": (author.get("nickname") or "").strip() or None,
+            "published_at": iso_utc_from_unix(detail.get("create_time")),
+            "images": images,
+        }
+
+    detail = asyncio.run(asyncio.wait_for(_fetch(), timeout=args.budget_seconds))
+    if not detail["external_id"]:
+        raise ScopeError("platform_error", "作品详情缺少 aweme_id")
+    if not detail["images"]:
+        raise ScopeError("not_image_post", "作品详情未包含图片地址（可能不是图集作品）")
+    return {"ok": True, "detail": detail}
+
+
 def main() -> int:
     args = parse_args()
     started = time.monotonic()
@@ -516,6 +586,9 @@ def main() -> int:
         return 1
 
     async def bounded() -> dict:
+        if args.mode == "detail":
+            # run_detail 内部自管事件循环：放到工作线程执行，避免嵌套 asyncio.run
+            return await asyncio.wait_for(asyncio.to_thread(run_detail, args), timeout=args.budget_seconds)
         return await asyncio.wait_for(run_scopes(args), timeout=args.budget_seconds)
 
     try:

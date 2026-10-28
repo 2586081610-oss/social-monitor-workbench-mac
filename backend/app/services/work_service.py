@@ -1,6 +1,7 @@
 """works 业务：列表/详情/重试/关键帧/本地视图/串行化。"""
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -46,11 +47,28 @@ def _archive_statuses(db: Session, work_ids: list[int]) -> dict[int, str]:
     return statuses
 
 
+def _download_interrupted(work) -> bool:
+    """DOWNLOADING 是否为可安全重试的中断态：无认领或认领进程已死亡。"""
+    if work.status != "DOWNLOADING":
+        return False
+    claimed_pid = getattr(work, "download_claim_pid", None)
+    if not claimed_pid:
+        return True  # 无认领戳：异常退出或旧路径遗留
+    try:
+        os.kill(int(claimed_pid), 0)
+        return False  # 认领进程存活：下载可能正在进行
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError, ValueError):
+        return False
+
+
 def _serialize_work(work, archive_check_status: str | None = None) -> Work:
     data = Work.model_validate(work).model_dump()
     data["archive_check_status"] = archive_check_status
     data["frame_count"] = frame_count(settings.media_root, work.frame_manifest_path)
     data["cover_url"] = _abs_media(data.get("cover_url"))
+    data["download_interrupted"] = _download_interrupted(work)
     return Work(**data)
 
 
@@ -196,10 +214,15 @@ class WorkService:
         work = work_repo.get(db, work_id)
         if work is None:
             raise not_found("WORK_NOT_FOUND")
-        if work.status != "FAILED":
+        if work.status == "FAILED":
+            pass  # 常规重试
+        elif work.status == "DOWNLOADING" and _download_interrupted(work):
+            pass  # 异常退出留下的中断下载：安全重试（活跃认领不允许）
+        else:
             raise conflict("NOT_RETRYABLE")
         work = work_repo.update(
-            db, work, status="QUEUED", last_error=None, retry_count=work.retry_count + 1
+            db, work, status="QUEUED", last_error=None, retry_count=work.retry_count + 1,
+            download_claimed_at=None, download_claim_pid=None,
         )
         task_repo.upsert(db, work.id, "download", "pending", attempts=0)
         db.commit()
