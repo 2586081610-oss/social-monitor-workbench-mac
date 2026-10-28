@@ -70,22 +70,42 @@ if [ ! -f "$ROOT/frontend/dist/index.html" ]; then
   (cd "$ROOT/frontend" && PATH="$NODE_DIR/current/bin:$PATH" npm ci --no-audit --no-fund && PATH="$NODE_DIR/current/bin:$PATH" npm run build)
 fi
 
-# ---- 可选: 上游克隆 ----
+# ---- 可选: 上游锁定版本获取 ----
 if [ "${1:-}" = "--upstreams" ]; then
-  clone() { # $1=dir $2=url $3=ref
-    if [ -d "$ROOT/tools/$1/.git" ]; then
-      say "上游 $1 已存在，跳过克隆（如需固定版本请核对: git -C tools/$1 rev-parse HEAD）"
-    else
-      say "克隆 $1 @ $3 ..."
-      git clone --quiet "$2" "$ROOT/tools/$1"
-      git -C "$ROOT/tools/$1" checkout --quiet --detach "$3"
+  # 优先 git clone（保留 .git 便于核对 HEAD）；github.com 直连不可用时回退
+  # codeload tarball（按 commit/tag 取包，写 UPSTREAM_SOURCE.json 记录来源与 sha256）
+  fetch() { # $1=dir $2=repo $3=ref
+    if [ -d "$ROOT/tools/$1" ]; then
+      say "上游 $1 已存在，跳过（来源见 tools/$1/UPSTREAM_SOURCE.json 或 .git）"
+      return 0
     fi
-    git -C "$ROOT/tools/$1" rev-parse HEAD
+    if git ls-remote "https://github.com/$2" >/dev/null 2>&1; then
+      say "克隆 $1 @ $3 ..."
+      git clone --quiet "https://github.com/$2" "$ROOT/tools/$1"
+      git -C "$ROOT/tools/$1" checkout --quiet --detach "$3"
+    else
+      say "github.com 不可达，改用 codeload tarball 获取 $1 @ $3 ..."
+      tmp="$(mktemp "${TMPDIR:-/tmp}/upper.XXXXXX.tar.gz")"
+      curl -sSL --max-time 600 -o "$tmp" "https://codeload.github.com/$2/tar.gz/$3"
+      mkdir -p "$ROOT/tools/$1"
+      tar -xzf "$tmp" -C "$ROOT/tools/$1" --strip-components 1
+      tar_sha="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+      rm -f "$tmp"
+      "$ROOT/.venv/bin/python" - "$1" "$2" "$3" "$tar_sha" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+d, repo, ref, sha = sys.argv[1:5]
+json.dump({"repo": repo, "ref": ref, "tarball_sha256": sha,
+           "fetched_at": datetime.now(timezone.utc).isoformat(),
+           "method": "codeload-tarball"},
+          open(f"tools/{d}/UPSTREAM_SOURCE.json", "w"), indent=1)
+PY
+    fi
   }
-  clone douyin-downloader https://github.com/jiji262/douyin-downloader.git ed863617aa52353821aca8fdebcfad4e916ebff5
-  clone mediacrawler https://github.com/NanmiCoder/MediaCrawler.git 68d9ef1c1da22eab75940dfd7cec259907006538
-  clone xhs-downloader https://github.com/JoeanAmier/XHS-Downloader.git 47840a1bee8438324ff10753c4291148c46071c8
-  clone rsshub https://github.com/DIYgod/RSSHub.git v2026.10.26-8483.9515261
+  fetch douyin-downloader jiji262/douyin-downloader ed863617aa52353821aca8fdebcfad4e916ebff5
+  fetch mediacrawler NanmiCoder/MediaCrawler 68d9ef1c1da22eab75940dfd7cec259907006538
+  fetch xhs-downloader JoeanAmier/XHS-Downloader 47840a1bee8438324ff10753c4291148c46071c8
+  fetch rsshub DIYgod/RSSHub refs/tags/v2026.10.26-8483.9515261
 
   say "把 jiji262 / XHS-Downloader 依赖装入主 venv（download.py 以主解释器直调）..."
   for req in douyin-downloader/requirements.txt xhs-downloader/requirements.txt; do
