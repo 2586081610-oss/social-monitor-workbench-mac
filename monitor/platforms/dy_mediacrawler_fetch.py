@@ -28,6 +28,18 @@ def _iso(ts) -> str | None:
         return None
 
 
+def _validated_aweme_list(response) -> list[dict]:
+    """An explicit success with a list is required before accepting emptiness."""
+    if not isinstance(response, dict) or response.get("status_code") != 0:
+        raise RuntimeError("douyin_response_failed")
+    rows = response.get("aweme_list")
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not row.get("aweme_id") for row in rows
+    ):
+        raise RuntimeError("douyin_response_invalid")
+    return rows
+
+
 async def _fetch(sec_uid: str, count: int) -> list[dict]:
     import config  # noqa: F401  COOKIES
     from media_platform.douyin.client import DouYinClient
@@ -66,7 +78,7 @@ async def _fetch(sec_uid: str, count: int) -> list[dict]:
             cookie_dict=cookie_dict,
         )
         res = await client.get_user_aweme_posts(sec_user_id=sec_uid, max_cursor="")
-        aweme_list = res.get("aweme_list") or []
+        aweme_list = _validated_aweme_list(res)
         items = []
         for aw in aweme_list:
             aid = str(aw.get("aweme_id") or "")
@@ -102,7 +114,7 @@ def main() -> int:
     try:
         items = asyncio.run(_fetch(sec_uid, count))
     except Exception as e:  # noqa: BLE001
-        print(json.dumps({"error": str(e)}))
+        print(json.dumps({"error": "douyin_fetch_failed", "kind": type(e).__name__}))
         return 1
     print(json.dumps(items, ensure_ascii=False))
     return 0

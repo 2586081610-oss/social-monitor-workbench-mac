@@ -24,6 +24,10 @@ logger = logging.getLogger("monitor.douyin_mediacrawler")
 _FETCH_SCRIPT = Path(__file__).resolve().parent / "dy_mediacrawler_fetch.py"
 
 
+class DouyinPollError(RuntimeError):
+    """A failed poll, distinct from a successfully fetched empty list."""
+
+
 class DouyinMediaCrawlerAdapter:
     """抖音博主最新作品抓取（子进程调用 MediaCrawler venv）。"""
 
@@ -55,7 +59,7 @@ class DouyinMediaCrawlerAdapter:
         """抓取博主首页最新 count 条作品（子进程隔离，超时 150s）。"""
         py = self._venv_python()
         if not py:
-            return []
+            raise DouyinPollError("mediacrawler_runtime_missing")
         env = dict(os.environ)
         env["MEDIACRAWLER_DIR"] = str(self.dir)
         try:
@@ -67,22 +71,28 @@ class DouyinMediaCrawlerAdapter:
                 env=env,
             )
         except subprocess.TimeoutExpired:
-            logger.warning("douyin 抓取超时（>150s）")
-            return []
+            raise DouyinPollError("mediacrawler_timeout") from None
+        except OSError:
+            raise DouyinPollError("mediacrawler_launch_failed") from None
         out = (proc.stdout or "").strip()
-        if not out or proc.returncode != 0:
-            logger.warning("douyin 抓取失败 rc=%s err=%s", proc.returncode, (proc.stderr or "")[-300:])
-            return []
+        if proc.returncode != 0:
+            raise DouyinPollError(f"mediacrawler_process_failed (rc={proc.returncode})")
+        if not out:
+            raise DouyinPollError("mediacrawler_empty_output")
         try:
             data = json.loads(out)
         except json.JSONDecodeError:
-            logger.warning("douyin 抓取输出非 JSON: %s", out[:200])
-            return []
-        if isinstance(data, dict) and data.get("error"):
-            logger.warning("douyin 抓取 error: %s", data["error"])
-            return []
-        if not isinstance(data, list):
-            return []
+            raise DouyinPollError("mediacrawler_invalid_json") from None
+        # Do not log upstream stdout/stderr: it can contain account data.
+        if isinstance(data, dict) and "error" in data:
+            raise DouyinPollError("mediacrawler_upstream_error")
+        if not isinstance(data, list) or any(
+            not isinstance(item, dict)
+            or not all(isinstance(item.get(key), str) for key in ("external_id", "title", "url", "platform"))
+            or not item["external_id"] or item["platform"] != "douyin"
+            for item in data
+        ):
+            raise DouyinPollError("mediacrawler_invalid_payload")
         checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         for item in data:
             if not isinstance(item, dict):

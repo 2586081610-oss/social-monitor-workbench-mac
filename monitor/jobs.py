@@ -214,6 +214,7 @@ def poll_douyin() -> None:
         ).scalars().all()
         total_new = 0
         ok_count = 0
+        failed_count = 0
         for creator in creators:
             sec_uid = creator.external_id or ""
             if not sec_uid:
@@ -221,13 +222,14 @@ def poll_douyin() -> None:
             try:
                 entries = adapter.poll_creator(sec_uid)
             except Exception as e:  # noqa: BLE001  单博主失败不阻塞其余
+                failed_count += 1
                 logger.warning("douyin 博主 %s 爬取异常: %s", creator.name, e)
                 health_repo.create_poll_log(db, "douyin", "fail", detail=f"mediacrawler 异常: {str(e)[:120]}", started_at=started)
                 continue
             total_new += _upsert_creator_entries(db, creator, entries)
             ok_count += 1
-        _update_cookie(db, "douyin", "OK" if ok_count else "FAIL", "MediaCrawler 监测")
-        health_repo.create_poll_log(db, "douyin", "ok" if ok_count else "fail", detail=None, started_at=started, new_works=total_new)
+        _update_cookie(db, "douyin", "OK" if ok_count and not failed_count else "FAIL", "MediaCrawler 监测")
+        health_repo.create_poll_log(db, "douyin", "ok" if ok_count and not failed_count else "fail", detail=(f"{failed_count} creator poll(s) failed" if failed_count else None), started_at=started, new_works=total_new)
         db.commit()
 
 
