@@ -80,11 +80,20 @@ def _clean_str(value) -> str | None:
     return None
 
 
+def _valid_timestamp(value) -> bool:
+    if not isinstance(value, str) or not _ISO_RE.fullmatch(value):
+        return False
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).year > 1970
+    except ValueError:
+        return False
+
+
 def _trusted_timestamp(record: dict) -> tuple[str | None, str | None]:
     """喜欢/收藏的动作时间：仅 platform_action 可信（B2 取证 §4）。"""
     occurred = record.get("occurredAt") if isinstance(record.get("occurredAt"), str) else None
     source = record.get("occurredAtSource") if isinstance(record.get("occurredAtSource"), str) else None
-    if occurred and source == "platform_action" and _ISO_RE.match(occurred):
+    if source == "platform_action" and _valid_timestamp(occurred):
         return occurred, source
     return None, source
 
@@ -96,12 +105,12 @@ def _normalize_record(record: dict, mark: str) -> tuple[PersonalItem | None, dic
     if not external_id:
         raw_id = _clean_str(record.get("id")) or ""
         # 兜底：DDR 记录 id 形如 "favorite_videos:<aweme_id>"
-        if raw_id.startswith((f"{t}:" for t in ("liked_videos", "favorite_videos"))):
+        if raw_id.startswith(("liked_videos:", "favorite_videos:")):
             external_id = raw_id.split(":", 1)[1]
     if not external_id:
         return None, {"reason": "missing_identity", "raw_id": raw_id[:80]}
     published = _clean_str(record.get("publishedAt"))
-    if published and not _ISO_RE.match(published):
+    if published and not _valid_timestamp(published):
         published = None  # 非完整 ISO 一律按未知处理，不猜测精度/时区
     occurred, occurred_source = _trusted_timestamp(record)
     media_type = _clean_str(record.get("mediaType"))
@@ -183,16 +192,19 @@ def parse_folders_document(doc) -> tuple[dict[str, str], dict[str, str]]:
     favorite = lists.get("favorite_videos") if isinstance(lists, dict) else None
     if not isinstance(favorite, dict):
         raise PersonalSourceError("schema_changed", "folders.lists.favorite_videos 缺失")
+    folder_rows, items = favorite.get("folders"), favorite.get("items")
+    if not isinstance(folder_rows, list) or not isinstance(items, dict):
+        raise PersonalSourceError("schema_changed", "folders 的 folders/items 类型不正确")
     folders: dict[str, str] = {}
-    for folder in favorite.get("folders") or []:
-        if isinstance(folder, dict) and isinstance(folder.get("id"), str) and isinstance(folder.get("name"), str):
-            folders[folder["id"]] = folder["name"]
+    for folder in folder_rows:
+        if not isinstance(folder, dict) or not isinstance(folder.get("id"), str) or not isinstance(folder.get("name"), str):
+            raise PersonalSourceError("schema_changed", "folders 含无效文件夹记录")
+        folders[folder["id"]] = folder["name"]
     assignments: dict[str, str] = {}
-    items = favorite.get("items")
-    if isinstance(items, dict):
-        for key, folder_id in items.items():
-            if isinstance(key, str) and isinstance(folder_id, str) and folder_id in folders:
-                assignments[key] = folder_id
+    for key, folder_id in items.items():
+        if not isinstance(key, str) or not isinstance(folder_id, str) or folder_id not in folders:
+            raise PersonalSourceError("schema_changed", "folders 含无效或悬空成员关系")
+        assignments[key] = folder_id
     return folders, assignments
 
 
@@ -228,10 +240,9 @@ def read_snapshot_api(base_url: str, timeout: float = 10.0) -> PersonalSnapshot:
     snapshot = _api_get(base, "/v1/records", timeout)
     parsed = parse_snapshot_document(snapshot, source="api", source_path=base)
     folders_doc = _api_get(base, "/v1/folders", timeout)
-    if isinstance(folders_doc, dict) and folders_doc.get("lists") is not None:
-        folders, assignments = parse_folders_document(folders_doc)
-        parsed.folders, parsed.folder_assignments = folders, assignments
-        parsed.folders_available = True
+    folders, assignments = parse_folders_document(folders_doc)
+    parsed.folders, parsed.folder_assignments = folders, assignments
+    parsed.folders_available = True
     return parsed
 
 

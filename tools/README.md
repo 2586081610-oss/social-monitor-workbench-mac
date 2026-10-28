@@ -137,3 +137,20 @@
 - **Mac cookie 导出**：`tools/export_dy_cookie_mac.py`、`tools/export_xhs_cookie_mac.py`（输出格式与 Windows 版一致；浏览器通道 edge → chrome → chromium 自动降级；`--dry-run` 只验证环境）。
 - **ASR 模型**（C2/D 阶段下载）：paraformer-large / fsmn-vad / ct-punc-c 三个 ModelScope 仓库均为 rolling `master`，下载后生成 sha256 manifest 并在 `transcribe.py` 显式 `revision`。
 - **WorkBuddy**：复用本机已装应用（/Applications/WorkBuddy.app），项目不安装、不依赖其托管运行时。
+
+### Mac 启停与本人来源导入
+
+`./start_all.sh --sandbox` 将持久化目录指向项目 `.sandbox/`；不加该参数则使用现有配置。默认只启动 API 和前端，**后端归档 worker 仍会恢复并执行待处理归档任务，可能更新信息文件与清单**；试验时请使用隔离数据。平台轮询和下载流水线不会随此脚本启动。
+
+启动脚本核对服务进程与 HTTP 探针，通过后才报告成功；失败时仅清理本次登记且身份匹配的进程。前端端口冲突直接失败，不换端口。`.run/*.identity` 记录启动时间与完整命令，停止时与 PID 一同核对。旧版本只有 PID 而无身份文件的存活进程、身份不匹配的进程均保留并提示人工核对；端口占用仅报告。启停互斥锁位于 `.run/control.lock`，若操作被强制中断，需先确认没有启停操作仍在进行，再移除遗留空锁目录。`NO_PROXY` 与 `no_proxy` 分别保留并补齐 `localhost,127.0.0.1,::1`，不更改上游代理配置。
+
+本人来源默认关闭；显式导入示例：
+
+```sh
+.venv/bin/python -m monitor.personal_source_ingest --source file --base-dir /path/to/ddr-data --dry-run
+.venv/bin/python -m monitor.personal_source_ingest --source file --base-dir /path/to/ddr-data
+```
+
+`--dry-run` 在内存副本上预演，不创建、迁移或修改配置指向的数据库与存储目录；已有数据库存在未检查点的 WAL 时显式拒绝预演，请先停止服务并完成检查点。缺失文件、无效 JSON、未知 schema 与损坏文件夹关系会明确失败，不作为空列表处理。无效日期按未知处理，不用导入时间代替。
+
+该通道只登记本人点赞、平铺收藏与 DDR 应用内本地单文件夹事实；不回写来源、不自动下载、不代表已支持抖音平台完整收藏夹或一作多夹同步。下载仍需在原工作台显式触发，沿用原下载器和归档服务。MediaCrawler 的超时、异常输出及上游错误会记录失败；真实空列表才表示成功且无新作品。
