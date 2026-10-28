@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -426,6 +427,24 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
     raise PipelineOfflineError(f"unsupported downloader platform: {platform}")
 
 
+def _download_douyin_browser(url: str, media_dir: Path) -> None:
+    """Run the optional Mac browser fallback in a bounded private scratch dir."""
+    try:
+        with tempfile.TemporaryDirectory(prefix='.douyin-fallback-', dir=media_dir) as scratch:
+            result = subprocess.run(
+                [sys.executable, '-m', 'monitor.pipeline.douyin_browser', url, scratch],
+                cwd=_project_root(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=150, check=False,
+            )
+            files = list(Path(scratch).glob('douyin-*.mp4'))
+            if result.returncode or len(files) != 1 or files[0].is_symlink() or not files[0].is_file():
+                raise PipelineOfflineError('douyin browser fallback failed')
+            # Link within the same filesystem without overwriting an existing file.
+            os.link(files[0], media_dir / files[0].name)
+    except (OSError, subprocess.TimeoutExpired):
+        raise PipelineOfflineError('douyin browser fallback could not complete') from None
+
+
 def download_with_result(
     platform: str,
     url: str,
@@ -452,8 +471,21 @@ def download_with_result(
         return DownloadResult("reused", reusable, None)
 
     before = _snapshot(media_dir)
-    _invoke_downloader(platform, url, media_dir)
-    written = _new_media_files(media_dir, before)
+    fallback_available = platform == 'douyin' and sys.platform == 'darwin'
+    primary_failed = False
+    try:
+        _invoke_downloader(platform, url, media_dir)
+    except PipelineOfflineError:
+        if not fallback_available:
+            raise
+        primary_failed = True
+    written = () if primary_failed else _new_media_files(media_dir, before)
+    if not written and fallback_available:
+        # Ignore files left by a failed primary downloader; only new validated
+        # files produced by the fallback can become its download receipt.
+        before_fallback = _snapshot(media_dir)
+        _download_douyin_browser(url, media_dir)
+        written = _new_media_files(media_dir, before_fallback)
     if not written:
         raise PipelineOfflineError(f"{platform} downloader produced no newly written original media")
     result = DownloadResult("downloaded", written, _completed_at())
