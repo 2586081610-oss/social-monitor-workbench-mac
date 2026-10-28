@@ -130,7 +130,7 @@
 | jiji262/douyin-downloader | commit `ed863617aa52353821aca8fdebcfad4e916ebff5` | **官方 README（2026-10-28）声明：CLI 单视频/图文/合集/音乐/喜欢/收藏下载受抖音风控，更新 Cookie 或重试无解**；参数契约吻合≠可用，C2 实测前不宣称可用 |
 | MediaCrawler | commit `68d9ef1c1da22eab75940dfd7cec259907006538` | 无 release/tag；独立 `.venv`（uv sync） |
 | XHS-Downloader | tag `2.8` = commit `47840a1bee8438324ff10753c4291148c46071c8` | 依赖装入主 venv（download.py 以主解释器直调） |
-| RSSHub | tag `v2026.10.26-8483.9515261` | Node 22 + corepack pnpm 12.15.0 |
+| RSSHub | tag `v2026.10.26-8483.9515261` | Node 22 + corepack pnpm 12.15.0；启动 `NODE_ENV=production node dist/index.mjs`；B站路由依赖 Playwright chromium（`pnpm dlx playwright install chromium`，用户级缓存）。已实测：公开用户路由拉取 40 条正常（该路由无发布时间字段，归档按未知时间处理） |
 
 - **分层 lock**（仓库根，`uv pip compile` 产物）：`requirements.lock`（核心9项）、`requirements-download.lock`（yutto 2.3.1 / yt-dlp 2026.10.26 / curl-cffi 0.17.0）、`requirements-asr.lock`（funasr 1.4.16 / torch 2.14.1 / imageio-ffmpeg 0.6.0）、`requirements-browser.lock`（playwright 1.64.1）。
 - **ffmpeg**：`imageio-ffmpeg`（0.6.0 为分发器版本）自带 arm64 二进制 → `tools/bin/ffmpeg`（不入库，`tools/bin/*.exe` 保留给 Windows）。
