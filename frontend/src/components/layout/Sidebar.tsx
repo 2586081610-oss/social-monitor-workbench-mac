@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Folder,
   Archive,
+  Heart,
   Inbox,
   Library,
   Settings,
@@ -24,6 +25,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/tags', label: '标签检索', icon: Tags },
   { to: '/unclassified', label: '待分类', icon: Inbox },
   { to: '/archive', label: '本地归档', icon: Archive },
+  { to: '/personal-source', label: '个人来源', icon: Heart },
   { to: '/lexicon', label: '词库管理', icon: Library },
   { to: '/settings', label: '设置', icon: Settings },
 ];

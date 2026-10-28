@@ -1,4 +1,4 @@
-/** 路由装配：9 个页面路由 + 全局布局。 */
+/** 路由装配：10 个页面路由 + 全局布局。 */
 import { Navigate, Route, Routes } from 'react-router-dom';
 import AppLayout from './components/layout/AppLayout';
 import DashboardPage from './pages/DashboardPage';
@@ -11,6 +11,7 @@ import UnclassifiedPage from './pages/UnclassifiedPage';
 import LexiconPage from './pages/LexiconPage';
 import SettingsPage from './pages/SettingsPage';
 import ArchivePage from './pages/ArchivePage';
+import PersonalSourcePage from './pages/PersonalSourcePage';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/tags" element={<TagsPage />} />
         <Route path="/unclassified" element={<UnclassifiedPage />} />
         <Route path="/archive" element={<ArchivePage />} />
+        <Route path="/personal-source" element={<PersonalSourcePage />} />
         <Route path="/lexicon" element={<LexiconPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
