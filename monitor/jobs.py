@@ -423,25 +423,115 @@ def _authorization_granted() -> bool:
         return personal_source_service.read_config(db).auto_download
 
 
+# 允许原样展示给用户/落库的固定文案（人工维护的白名单字面量；动态插值不进白名单）
+_SAFE_ERROR_LITERALS = frozenset({
+    # download.py（PipelineOfflineError 常量文案）
+    "Douyin downloader configuration is unavailable",
+    "Douyin downloader is not configured",
+    "MediaCrawler directory is unavailable",
+    "MediaCrawler is not configured",
+    "XHS download requires a configured browser cookie",
+    "XHS downloader is not configured",
+    "download produced no video file",
+    "media work directory is unavailable",
+    "yt-dlp is not installed",
+    "yutto is not installed",
+    "douyin image posts are not supported for automatic download yet "
+    "(no verified downloader); the work stays registered but fails honestly",
+    # transcribe.py 常量文案
+    "转写引擎 funasr 未安装（首次部署需预下载 paraformer-zh 模型，K18）",
+    "转写结果为空",
+    # twitter_image.py 常量文案
+    "image album changed during validation",
+    "image album contains an empty file",
+    "image album contains an invalid image file",
+    "image album contains an invalid source URL",
+    "image album file could not be validated",
+    "image manifest could not be written",
+    "image work directory cannot be a link",
+    "image work directory is unavailable",
+    "image work has no expected source images",
+    "registered image record is invalid",
+    "this image adapter supports Twitter/X media only",
+    # douyin_images.py 常量文案（含 detail 失败 kind 映射）
+    "图集作品目录不可用",
+    "作品详情未包含可下载的图片地址（可能不是图集作品）",
+    "作品详情身份与目标作品不一致，已拒绝下载",
+    "图片下载失败：CDN 返回空内容",
+    "图片下载失败：内容不是有效图片（可能是错误页或损坏数据）",
+    "未配置抖音登录态文件，请先完成登录导出（config/f2/douyin_cookie.txt 或 F2_DOUYIN_COOKIE_FILE）",
+    "F2 隔离运行时未安装（tools/f2-runtime，见其 README）",
+    "抖音登录态可能已过期，请重新导出登录态文件",
+    "触发平台限流，请稍后重试",
+    "作品详情获取超时，请稍后重试",
+    "作品详情返回异常，请稍后重试",
+    "作品详情获取失败，请稍后重试",
+    # douyin_video.py 常量文案（含 detail 失败 kind 映射）
+    "视频作品目录不可用",
+    "作品详情未包含可下载的视频直链（可能不是视频作品）",
+    "作品详情身份与目标作品不一致，已拒绝下载",
+    "视频下载失败：CDN 返回空内容",
+    "视频下载失败：内容不是有效 MP4（可能是错误页或损坏数据）",
+})
+
+# 受控动态文案：前缀白名单 + 余量全match给定模式（无自由文本、无凭据/路径/ID）
+_SAFE_DYNAMIC_RULES: tuple[tuple[str, str], ...] = (
+    ("图片下载失败：CDN 返回 HTTP ", r"\d+"),
+    ("视频下载失败：CDN 返回 HTTP ", r"\d+"),
+    ("图片下载失败（第 ", r"\d+ 张）：内容不是有效图片（可能是错误页或损坏数据）"),
+    ("图片下载失败（第 ", r"\d+ 张）：\w+Error"),
+    ("视频下载失败：", r"\w+Error"),
+    ("download checkpoint failed (", r"\w+Error\)"),
+)
+
+
+def _safe_dynamic_text(text: str) -> str | None:
+    """受控动态文案：仅允许固定前缀 + 限定模式的余量，否则 None。"""
+    import re
+
+    for prefix, pattern in _SAFE_DYNAMIC_RULES:
+        if text.startswith(prefix) and re.fullmatch(re.escape(prefix) + pattern, text):
+            return text
+    return None
+
+
 def _safe_error_text(exc: Exception) -> str:
     """失败持久化（works.last_error / 任务 stage error / API / 页面）用的安全文案。
 
-    白名单异常（PipelineOfflineError/TwitterImageError）的消息是人工维护的
-    固定文案，直接保留以便用户理解；其余异常只记类型 + 脱敏摘要——凭据、
-    账号/作品/收藏夹标识、URL 查询串不得进入 API 与页面。
+    白名单机制：仅人工维护的字面量与受控动态形态（固定前缀 + 纯数字）允许
+    原样展示；其余一律只记录异常类别名——凭据、路径、未知敏感值不可能进入
+    DB/API/页面（不依赖正则预测内容）。
     """
+    text = str(exc)
+    if text in _SAFE_ERROR_LITERALS:
+        return text
+    dynamic = _safe_dynamic_text(text)
+    if dynamic is not None:
+        return dynamic
     if isinstance(exc, PipelineOfflineError):
-        return str(exc)
+        return "下载通道不可用（下载器配置缺失或平台临时拒绝，详见运行日志的 error_type）"
+    try:
+        from monitor.pipeline.douyin_images import DouyinImageError
+
+        if isinstance(exc, DouyinImageError):
+            return "图集下载失败（登录态、运行时或平台返回异常，详见运行日志的 error_type）"
+    except ImportError:  # pragma: no cover
+        pass
+    try:
+        from monitor.pipeline.douyin_video import DouyinVideoError
+
+        if isinstance(exc, DouyinVideoError):
+            return "视频直取失败（登录态、运行时或平台返回异常，详见运行日志的 error_type）"
+    except ImportError:  # pragma: no cover
+        pass
     try:
         from monitor.pipeline.twitter_image import TwitterImageError
 
         if isinstance(exc, TwitterImageError):
-            return str(exc)
+            return "图片下载失败（归档校验未通过，详见运行日志的 error_type）"
     except ImportError:  # pragma: no cover
         pass
-    from monitor.platforms.douyin_personal_source import redact_sensitive_text
-
-    return redact_sensitive_text(f"{type(exc).__name__}: {exc}", max_length=200)
+    return type(exc).__name__
 
 
 def download_personal_source_works(*, limit: int = 10) -> int:
@@ -806,14 +896,28 @@ def download_and_checkpoint(
         manifest_path = None
         content_type = str(work.content_type or "video").lower()
         if content_type == "video":
-            result = download.download_with_result(
-                work.platform,
-                work.url,
-                media_dir,
-                registered_files=registered_files,
-                allow_browser_fallback=allow_browser_fallback,
-            )
-            download_source = f"monitor.pipeline.download:{work.platform}"
+            try:
+                result = download.download_with_result(
+                    work.platform,
+                    work.url,
+                    media_dir,
+                    registered_files=registered_files,
+                    allow_browser_fallback=allow_browser_fallback,
+                )
+                download_source = f"monitor.pipeline.download:{work.platform}"
+            except PipelineOfflineError:
+                # 个人来源禁用网页播放兜底：jiji 主路径失败后改用 F2 详情直链直取
+                # （仍是 API/CDN，无网页无播放）。其他来源保持既有行为不变。
+                if allow_browser_fallback or work.platform != "douyin":
+                    raise
+                from monitor.pipeline import douyin_video
+
+                result = douyin_video.download_f2_video_with_result(
+                    work,
+                    media_dir,
+                    registered_files=registered_files,
+                )
+                download_source = "monitor.pipeline.douyin_video"
         elif work.platform == "douyin":
             # 抖音图集：F2 detail 只读接口取图片直链 + CDN 直取，全程不打开/播放
             # 作品网页；失败走 DouyinImageError 的白名单/脱敏文案，如实标记。

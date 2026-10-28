@@ -256,6 +256,85 @@ async def main() -> dict:
     check("like_missing_sec_user_id", checks["like_missing_sec_user_id"] == "missing_sec_user_id",
           str(checks["like_missing_sec_user_id"]))
 
+    # 8. detail 模式 × 真实 PostDetailFilter（网络桩）：P0 回归
+    #    真实 Filter 暴露 api_status_code 而无 status_code 属性——run_detail 必须
+    #    读原始响应，否则 AttributeError；图集缺行必须拒绝；身份不一致必须拒绝。
+    from f2.apps.douyin.crawler import DouyinCrawler as _DC
+
+    detail_payloads: dict = {"current": None}
+
+    async def fake_post_detail(self, params):
+        return detail_payloads["current"]
+
+    _DC.fetch_post_detail = fake_post_detail
+
+    def _detail_args(tmp: str) -> object:
+        return _ns_with(cookie_file=str(Path(tmp) / "c.txt"), output=str(Path(tmp) / "o.json"))
+
+    def _ns_with(**kwargs) -> object:
+        base = {"mode": "detail", "cookie_file": "", "output": "", "aweme_id": "1234567890123456789",
+                "timeout": 0, "max_retries": 1, "budget_seconds": 10, "lock_file": ""}
+        base.update(kwargs)
+        return type("Args", (), base)()
+
+    def _payload(aweme_id: str, rows: list, status_code: int = 0, video: bool = False) -> dict:
+        body = {"status_code": status_code, "aweme_detail": {
+            "aweme_id": aweme_id, "author": {"nickname": "synthetic"}, "desc": "sample",
+            "create_time": 1700000000, "images": rows}}
+        if video:
+            body["aweme_detail"]["video"] = {"play_addr": {"url_list": ["https://v.example.test/v.mp4"]}}
+        return body
+
+    with tempfile.TemporaryDirectory(prefix="f2-detail-check-") as tmp:
+        cookie_file = Path(tmp) / "c.txt"
+        cookie_file.write_text("sessionid=synthetic", encoding="utf-8")
+
+        # 8a. 成功：完整图集 + 视频直链（identity 一致）
+        detail_payloads["current"] = _payload("1234567890123456789",
+                                              [{"url_list": ["https://i.example.test/1.jpg"]},
+                                               {"url_list": ["https://i.example.test/2.jpg"]}], video=True)
+        result = await asyncio.to_thread(fetch.run_detail, _ns_with(cookie_file=str(cookie_file), output=str(Path(tmp) / "a.json")))
+        d = result.get("detail") or {}
+        checks["detail_success"] = bool(result.get("ok")) and len(d.get("images", [])) == 2 \
+            and d.get("video_url") == "https://v.example.test/v.mp4" \
+            and d.get("external_id") == "1234567890123456789"
+        check("detail_success", checks["detail_success"] is True, str(result)[:200])
+
+        # 8b. 图集缺行（空 url_list）→ incomplete_album，不静默当完整
+        detail_payloads["current"] = _payload("1234567890123456789",
+                                              [{"url_list": ["https://i.example.test/1.jpg"]},
+                                               {"url_list": []},
+                                               {"url_list": ["https://i.example.test/3.jpg"]}])
+        try:
+            await asyncio.to_thread(fetch.run_detail, _ns_with(cookie_file=str(cookie_file), output=str(Path(tmp) / "b.json")))
+            checks["detail_partial_album"] = "NO_ERROR_BAD"
+        except fetch.ScopeError as exc:
+            checks["detail_partial_album"] = exc.kind
+        check("detail_partial_album", checks["detail_partial_album"] == "incomplete_album",
+              str(checks["detail_partial_album"]))
+
+        # 8c. 登录失效（status_code=8）→ login_expired
+        detail_payloads["current"] = _payload("1234567890123456789",
+                                              [{"url_list": ["https://i.example.test/1.jpg"]}], status_code=8)
+        try:
+            await asyncio.to_thread(fetch.run_detail, _ns_with(cookie_file=str(cookie_file), output=str(Path(tmp) / "c.json")))
+            checks["detail_status_8"] = "NO_ERROR_BAD"
+        except fetch.ScopeError as exc:
+            checks["detail_status_8"] = exc.kind
+        check("detail_status_8", checks["detail_status_8"] == "login_expired",
+              str(checks["detail_status_8"]))
+
+        # 8d. 身份不一致 → identity_mismatch
+        detail_payloads["current"] = _payload("9999999999999999999",
+                                              [{"url_list": ["https://i.example.test/1.jpg"]}])
+        try:
+            await asyncio.to_thread(fetch.run_detail, _ns_with(cookie_file=str(cookie_file), output=str(Path(tmp) / "d.json")))
+            checks["detail_identity_mismatch"] = "NO_ERROR_BAD"
+        except fetch.ScopeError as exc:
+            checks["detail_identity_mismatch"] = exc.kind
+        check("detail_identity_mismatch", checks["detail_identity_mismatch"] == "identity_mismatch",
+              str(checks["detail_identity_mismatch"]))
+
     return {"ok": not failures, "checks": checks, "failures": failures}
 
 

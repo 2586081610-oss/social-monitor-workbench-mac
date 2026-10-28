@@ -25,6 +25,8 @@ if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from monitor import jobs  # noqa: E402
+from monitor.pipeline import download, download_result  # noqa: E402
 from tests.test_douyin_f2_source import _make_fake_runtime  # noqa: E402
 
 from app.models import ArchiveEntry, PersonalSourceFolderItem, PersonalSourceMark, Work  # noqa: E402
@@ -359,9 +361,10 @@ def test_manual_sync_download_consumes_backlog_or_marks_honestly(tmp_path):
                 "SELECT status, last_error FROM works WHERE external_id='7000001'").fetchone()
         assert status_row is not None
         if auto_download == "true":
-            # 下载步骤执行过：下载器未配置 → 如实 FAILED（不打开网页兜底、不虚报）
+            # 下载步骤执行过：jiji 未配置 → F2 直取亦失败（合成 CDN 不可达）→ 如实 FAILED
+            # （全程无网页播放兜底、无虚报成功）
             assert status_row[0] == "FAILED"
-            assert "not configured" in (status_row[1] or "")
+            assert (status_row[1] or ""), "FAILED 应带安全错误文案"
         else:
             # 授权关闭 → 不处理
             assert status_row[0] in ("NEW", "QUEUED")
@@ -774,9 +777,12 @@ def test_download_failure_does_not_expose_token_in_work_api(client, auth_headers
         assert response.status_code == 200
         assert secret not in response.text, "synthetic token exposed in work detail API"
         detail = response.json()["data"]
-        assert detail["last_error"] and "RuntimeError" in detail["last_error"]  # 类型保留，可诊断
-        assert "<redacted>" in detail["last_error"]  # 凭据值已脱敏（原始令牌与 Bearer 字样均不出现）
-        assert "Bearer" not in detail["last_error"] and secret not in detail["last_error"]
+        # 白名单安全文案：未知异常只存类别名——合成令牌与原始消息不可能进入 API
+        assert detail["last_error"] == "RuntimeError"
+        assert secret not in (detail["last_error"] or "")
+        assert "Bearer" not in (detail["last_error"] or "") and "Authorization" not in (detail["last_error"] or "")
+        stages = detail.get("stages") or []
+        assert all(secret not in (s.get("error") or "") for s in stages)
     finally:
         row = db.get(Work, work.id)
         if row is not None:
@@ -1152,3 +1158,216 @@ def test_download_checkpoint_default_infers_personal_facts(db, monkeypatch):
     except RuntimeError as exc:
         assert "stop-after-inference" in str(exc)
     assert observed.get("result") is True  # 事实判定识别出个人来源覆盖 → 兜底默认禁用
+
+
+# ---------- 第五轮复审回归 ----------
+
+def test_html_error_response_is_not_registered_as_an_image(db, monkeypatch, clean_settings):
+    """CDN 返回 HTML 错误页 → 不得登记为原图片/生成下载凭据。"""
+    from monitor.pipeline import douyin_images as images
+
+    work = Work(platform="douyin", external_id="9500001", title="synthetic", url="u",
+                source_type="personal_source", content_type="image", status="NEW")
+    db.add(work)
+    db.commit()
+    monkeypatch.setattr(images, "_detail_images",
+                        lambda aweme_id: (["https://example.test/1.jpg"], {"external_id": aweme_id}))
+    monkeypatch.setattr(images, "fetch_url_bytes", lambda url: b"<html>access denied</html>")
+    try:
+        jobs.download_and_checkpoint(db, work)
+        raise AssertionError("HTML page accepted as image")
+    except (jobs.PipelineOfflineError, images.DouyinImageError):
+        db.rollback()
+        from app.models import Task
+        assert db.query(Task).filter_by(work_id=work.id, stage="download", status="succeeded").count() == 0
+
+
+def test_partial_album_failure_keeps_existing_archived_files(tmp_path, monkeypatch):
+    """重试中第 2 张失败 → 既有归档原图不得被覆盖（staging 隔离 + 全册通过才提交）。"""
+    import json as _json
+    from types import SimpleNamespace
+
+    from monitor.pipeline import douyin_images as images
+
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    first = image_dir / "douyin-image-1.jpg"
+    second = image_dir / "douyin-image-2.jpg"
+    first.write_bytes(b"original-media-1")
+    second.write_bytes(b"original-media-2")
+    old_urls = ["https://example.test/old1", "https://example.test/old2"]
+    (image_dir / images.MANIFEST_NAME).write_text(_json.dumps({"images": [{"source_url": u} for u in old_urls]}))
+    work = SimpleNamespace(external_id="9500002", media_urls=None)
+    monkeypatch.setattr(images, "_detail_images",
+                        lambda aweme_id: (["https://example.test/new1", "https://example.test/new2"],
+                                          {"external_id": aweme_id}))
+
+    def flaky(url):
+        if url.endswith("new2"):
+            raise images.DouyinImageError("图片下载失败：CDN 返回 HTTP 403")
+        return b"replacement-media-1"
+
+    monkeypatch.setattr(images, "fetch_url_bytes", flaky)
+    records = [{"path": str(first), "size_bytes": len(b"original-media-1")},
+               {"path": str(second), "size_bytes": len(b"original-media-2")}]
+    with pytest.raises(images.DouyinImageError):
+        images.download_douyin_images_with_result(work, image_dir, registered_files=records)
+    assert first.read_bytes() == b"original-media-1", "existing first image was overwritten"
+    assert second.read_bytes() == b"original-media-2"
+    assert not list(image_dir.glob(".staging-*"))
+
+
+def test_detail_identity_must_match_requested_work(tmp_path, monkeypatch):
+    """详情身份与请求作品不一致 → 拒绝下载/登记。"""
+    from types import SimpleNamespace
+
+    from monitor.pipeline import douyin_images as images
+
+    work = SimpleNamespace(external_id="9500003", media_urls=None)
+    monkeypatch.setattr(images, "_detail_images",
+                        lambda aweme_id: (["https://example.test/p.jpg"], {"external_id": "9500004"}))
+    monkeypatch.setattr(images, "fetch_url_bytes", lambda url: b"synthetic")
+    with pytest.raises(images.DouyinImageError):
+        images.download_douyin_images_with_result(work, tmp_path / "images")
+
+
+def test_unrecognized_secret_does_not_leak_as_error_message():
+    """未知异常：只存类别名，不透明的合成值不可能进入文案。"""
+    secret = "FAKEOPAQUEVALUENOTREAL"
+    safe = jobs._safe_error_text(RuntimeError("unexpected response contained private value " + secret))
+    assert safe == "RuntimeError"
+    assert secret not in safe
+
+
+def test_pipeline_offline_error_does_not_leak_sensitive_text():
+    """PipelineOfflineError 非白名单消息（含 Bearer）→ 固定类别文案，不透传原文。"""
+    secret = "FAKEOPAQUEVALUENOTREAL"
+    safe = jobs._safe_error_text(jobs.PipelineOfflineError("Authorization: Bearer " + secret))
+    assert secret not in safe
+    assert "Bearer" not in safe and "Authorization" not in safe
+
+    # transcribe 风格：PipelineOfflineError 携带本机路径 → 类别文案
+    safe2 = jobs._safe_error_text(jobs.PipelineOfflineError("输入文件不存在: /Users/someone/private/media/x.mp4"))
+    assert "/Users/someone" not in safe2
+
+
+def test_known_safe_messages_still_readable():
+    """白名单字面量保持用户可读（下载器未配置等），受控动态形态（HTTP 码）也保留。"""
+    assert jobs._safe_error_text(jobs.PipelineOfflineError("Douyin downloader is not configured")) == \
+        "Douyin downloader is not configured"
+    dynamic = jobs._safe_error_text(jobs.PipelineOfflineError("图片下载失败：CDN 返回 HTTP 403"))
+    assert dynamic == "图片下载失败：CDN 返回 HTTP 403"
+
+
+def test_image_format_validation(tmp_path, monkeypatch):
+    """图片内容校验：PNG/JPEG/WebP/GIF 接受且扩展名正确；HTML/损坏数据拒绝。"""
+    from monitor.pipeline import douyin_images as images
+
+    assert images._detect_image(b"\x89PNG\r\n\x1a\n" + b"x" * 32) == (".png", "image/png")
+    assert images._detect_image(b"\xff\xd8\xff" + b"x" * 32) == (".jpg", "image/jpeg")
+    assert images._detect_image(b"RIFF" + b"x" * 4 + b"WEBP" + b"x" * 16) == (".webp", "image/webp")
+    assert images._detect_image(b"GIF89a" + b"x" * 32) == (".gif", "image/gif")
+    assert images._detect_image(b"<html>access denied</html>") is None
+    assert images._detect_image(b"") is None
+
+
+def test_video_direct_download_offline(tmp_path, monkeypatch):
+    """F2 视频直取（离线）：detail 直链 + CDN 桩 → ftyp 校验 + 下载凭据。"""
+    from types import SimpleNamespace
+
+    from monitor.pipeline import douyin_video
+
+    work = SimpleNamespace(external_id="9400999noimg")
+    monkeypatch.setenv("F2_DOUYIN_COOKIE_FILE", str(tmp_path / "cookie.txt"))
+    (tmp_path / "cookie.txt").write_text("sessionid=synthetic", encoding="utf-8")
+    monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
+
+    def fake_stream(url, target, **kw):
+        payload = b"\x00\x00\x00\x18ftypmp42" + b"v" * (64 * 1024)
+        target.write_bytes(payload)
+        return len(payload)
+
+    monkeypatch.setattr(douyin_video, "stream_url_to_file", fake_stream)
+    result = douyin_video.download_f2_video_with_result(work, tmp_path / "media")
+    assert result.disposition == "downloaded"
+    assert result.files[0].media_type == "video" and result.files[0].size_bytes > 0
+    # 二跑：登记校验通过 → 复用
+    result2 = douyin_video.download_f2_video_with_result(
+        work, tmp_path / "media", registered_files=[{
+            "path": str(result.files[0].path), "size_bytes": result.files[0].size_bytes,
+            "sha256": result.files[0].sha256, "media_type": "video",
+        }])
+    assert result2.disposition == "reused"
+
+
+def test_video_stream_validation_rejects_html_and_tiny_payload():
+    """视频流校验：ftyp 魔数与最小体积；HTML/损坏数据拒绝。"""
+    from monitor.pipeline import douyin_video
+
+    good = b"\x00\x00\x00\x18ftypmp42" + b"v" * (64 * 1024)
+    douyin_video._validate_video_stream(good[:8], len(good))  # 通过
+    with pytest.raises(douyin_video.DouyinVideoError):
+        douyin_video._validate_video_stream(b"<html>", 25)  # HTML 错误页
+    with pytest.raises(douyin_video.DouyinVideoError):
+        douyin_video._validate_video_stream(good[:8], 10)  # 过小
+    with pytest.raises(douyin_video.DouyinVideoError):
+        douyin_video._validate_video_stream(b"", 0)  # 空
+
+
+def test_video_direct_rejects_non_video_work(tmp_path, monkeypatch):
+    """非视频作品（无 video_url）：如实失败，不产生凭据。"""
+    from types import SimpleNamespace
+
+    from monitor.pipeline import douyin_video
+
+    work = SimpleNamespace(external_id="9001234567890123456")  # 伪运行时：该 ID 是图集（video_url=None）
+    monkeypatch.setenv("F2_DOUYIN_COOKIE_FILE", str(tmp_path / "cookie.txt"))
+    (tmp_path / "cookie.txt").write_text("sessionid=synthetic", encoding="utf-8")
+    monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
+    with pytest.raises(douyin_video.DouyinVideoError):
+        douyin_video.download_f2_video_with_result(work, tmp_path / "media")
+    assert not list((tmp_path / "media").glob("douyin-video-*.mp4"))
+
+
+def test_personal_video_uses_f2_direct_after_jiji_failure(db, monkeypatch, clean_settings, tmp_path):
+    """个人视频作品：jiji 失败 → F2 详情直取（仍无网页）→ 成功凭据；非个人不触发。"""
+    from monitor.pipeline import douyin_video
+
+    work = Work(platform="douyin", external_id="9001234567890123999", title="v", url="u",
+                source_type="personal_source", content_type="video", status="NEW")
+    db.add(work)
+    db.commit()
+    _set(db, AUTO_DOWNLOAD_KEY, "true")
+    original = _quarantine_other_works(db, {"9001234567890123999"})
+    monkeypatch.setenv("F2_DOUYIN_COOKIE_FILE", str(tmp_path / "cookie.txt"))
+    (tmp_path / "cookie.txt").write_text("sessionid=synthetic", encoding="utf-8")
+    monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
+
+    calls: list[str] = []
+
+    def jiji_fail(platform, url, media_dir, **kw):
+        calls.append("jiji")
+        raise download.PipelineOfflineError("Douyin downloader is not configured")
+
+    def fake_f2(w, media_dir, **kw):
+        calls.append("f2")
+        from monitor.pipeline.download_result import MediaFile
+
+        target = Path(str(media_dir)) / "douyin-video-9001234567890123999.mp4"
+        target.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"v" * 1024)
+        return download_result.DownloadResult("downloaded", (MediaFile(
+            path=target, size_bytes=target.stat().st_size, media_type="video"),), "2026-10-29T00:00:00Z")
+
+    monkeypatch.setattr(jobs.download, "_invoke_downloader", jiji_fail)
+    monkeypatch.setattr(douyin_video, "download_f2_video_with_result", fake_f2)
+    try:
+        jobs.download_and_checkpoint(db, work)
+        assert calls == ["jiji", "f2"]  # jiji 失败后走了 F2 直取
+        db.refresh(work)
+        assert work.downloaded_at
+    finally:
+        row = db.get(Work, work.id)
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        _restore_works(db, original)

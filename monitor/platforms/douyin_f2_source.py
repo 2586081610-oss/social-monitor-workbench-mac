@@ -224,9 +224,10 @@ def read_aweme_detail(
     """
     cookie_path = resolve_cookie_file(cookie_file)
     if not cookie_path.is_file():
+        # 不回显本机路径：文案只指向配置约定
         raise PersonalSourceError(
             "login_required",
-            f"未找到抖音登录态文件: {cookie_path}（设置 {COOKIE_FILE_ENV} 或先由用户完成登录导出）",
+            f"未找到抖音登录态文件（默认 config/f2/douyin_cookie.txt 或设置 {COOKIE_FILE_ENV}），请先由用户完成登录导出",
         )
     runtime = resolve_runtime_dir(runtime_dir)
     python = runtime_python(runtime)
@@ -302,7 +303,7 @@ def read_snapshot_f2(
     if not cookie_path.is_file():
         raise PersonalSourceError(
             "login_required",
-            f"未找到抖音登录态文件: {cookie_path}（设置 {COOKIE_FILE_ENV} 或先由用户完成登录导出）",
+            f"未找到抖音登录态文件（默认 config/f2/douyin_cookie.txt 或设置 {COOKIE_FILE_ENV}），请先由用户完成登录导出",
         )
     runtime = resolve_runtime_dir(runtime_dir)
     python = runtime_python(runtime)

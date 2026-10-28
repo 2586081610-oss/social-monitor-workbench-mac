@@ -243,7 +243,11 @@ incomplete = os.environ.get("F2_FAKE_INCOMPLETE") == "1"
 if mode == "detail":
     # detail 模式：合成图集详情（两张图片直链）；--aweme-id 含 "noimg" 时返回非图集
     if "noimg" in aweme_id:
-        doc = {{"ok": False, "error": {{"kind": "not_image_post", "message": "作品详情未包含图片地址"}}}}
+        doc = {{"ok": True, "detail": {{
+            "external_id": aweme_id, "title": "合成视频", "author": "测试作者",
+            "published_at": "2026-05-01T08:00:00Z", "images": [],
+            "video_url": "https://cdn.example.test/v.mp4",
+        }}}}
     else:
         doc = {{"ok": True, "detail": {{
             "external_id": aweme_id,
@@ -254,6 +258,7 @@ if mode == "detail":
                 "https://cdn.example.test/p1.jpg",
                 "https://cdn.example.test/p2.jpg",
             ],
+            "video_url": None,
         }}}}
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False)

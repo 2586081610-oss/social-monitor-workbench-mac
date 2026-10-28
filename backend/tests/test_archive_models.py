@@ -260,6 +260,9 @@ def test_work_reference_returns_every_physical_archive_copy(db):
 
 
 def test_archive_jobs_persist_progress_and_claim_one_unexpired_lease(db):
+    # 共享测试库：清掉其他用例遗留的归档任务，保证认领断言只针对本用例创建的任务
+    db.query(ArchiveJob).delete()
+    db.commit()
     job = archive_repo.create_job(
         db,
         job_type="scan",

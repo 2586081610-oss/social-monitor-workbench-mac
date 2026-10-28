@@ -510,11 +510,15 @@ def write_output(path: str, doc: dict) -> None:
 
 
 def run_detail(args: argparse.Namespace) -> dict:
-    """单作品详情（图文下载的数据来源）：只调 aweme/detail 只读接口，不打开网页。
+    """单作品详情（图文/视频直取的数据来源）：只调 aweme/detail 只读接口，不打开网页。
 
     同步函数（内部自管事件循环，调用方需在工作线程中执行）。
-    输出白名单字段：作品身份、图片 CDN 地址列表、标题、作者、发布时间。
-    失败语义与列表模式一致（kind 明确，绝不伪装成功）。
+    状态码从**原始响应**读取——真实固定版 PostDetailFilter 暴露的是
+    `api_status_code` 而无 `status_code` 属性，不能依赖 Filter 属性语义。
+    输出白名单字段：作品身份、图片直链列表、视频直链（图集/视频二选一或皆无）。
+    失败语义与列表模式一致（kind 明确，绝不伪装成功）：
+    - 图集逐行严格校验：任何一行缺 url_list/空直链 → incomplete_album（不静默跳过）；
+    - 作品身份与请求的 aweme_id 不一致 → identity_mismatch（不下载错作品）。
     """
     cookie = Path(args.cookie_file).read_text(encoding="utf-8").strip()
     if not cookie:
@@ -545,34 +549,51 @@ def run_detail(args: argparse.Namespace) -> dict:
         except Exception as exc:  # noqa: BLE001 - 统一翻译（删除/私密/接口异常），消息不含作品 ID
             raise scope_error_from_exception(exc, "作品详情", "detail") from None
         raw = page._to_raw()
-        status_error = _payload_status_kind(page.status_code)
+        if not isinstance(raw, dict):
+            raise ScopeError("platform_error", "作品详情响应不是 JSON 对象")
+        status_error = _payload_status_kind(raw.get("status_code"))
         if status_error is not None:
             raise ScopeError(status_error[0], f"作品详情 {status_error[1]}")
-        detail = raw.get("aweme_detail") if isinstance(raw, dict) else None
+        detail = raw.get("aweme_detail")
         if not isinstance(detail, dict):
             raise ScopeError("platform_error", "作品详情响应缺少 aweme_detail 字段")
+        external_id = str(detail.get("aweme_id") or "").strip()
+        if not external_id:
+            raise ScopeError("platform_error", "作品详情缺少 aweme_id")
+        if external_id != aweme_id:
+            raise ScopeError("identity_mismatch", "作品详情身份与请求不一致（详情返回了另一个作品）")
+        # 图集逐行严格校验：缺行/空直链都算不完整，绝不静默跳过
         images: list[str] = []
         rows = detail.get("images") if isinstance(detail.get("images"), list) else []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            url_list = row.get("url_list")
-            if isinstance(url_list, list) and url_list and isinstance(url_list[0], str):
-                images.append(url_list[0])
+        for index, row in enumerate(rows, start=1):
+            url = None
+            if isinstance(row, dict) and isinstance(row.get("url_list"), list) and row["url_list"]:
+                first = row["url_list"][0]
+                if isinstance(first, str) and first.startswith(("http://", "https://")):
+                    url = first
+            if url is None:
+                raise ScopeError("incomplete_album", f"作品图集第 {index} 行缺少有效图片直链（整册按不完整处理）")
+            images.append(url)
+        # 视频直链（F2 已按清晰度选优）：raw 读取，缺 video 时为 None
+        video_url = None
+        video = detail.get("video") if isinstance(detail.get("video"), dict) else {}
+        play_addr = video.get("play_addr") if isinstance(video.get("play_addr"), dict) else {}
+        play_urls = play_addr.get("url_list") if isinstance(play_addr.get("url_list"), list) else []
+        for candidate in play_urls:
+            if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                video_url = candidate
+                break
         author = detail.get("author") if isinstance(detail.get("author"), dict) else {}
         return {
-            "external_id": str(detail.get("aweme_id") or "").strip(),
+            "external_id": external_id,
             "title": (detail.get("desc") or "").strip() or None,
             "author": (author.get("nickname") or "").strip() or None,
             "published_at": iso_utc_from_unix(detail.get("create_time")),
             "images": images,
+            "video_url": video_url,
         }
 
     detail = asyncio.run(asyncio.wait_for(_fetch(), timeout=args.budget_seconds))
-    if not detail["external_id"]:
-        raise ScopeError("platform_error", "作品详情缺少 aweme_id")
-    if not detail["images"]:
-        raise ScopeError("not_image_post", "作品详情未包含图片地址（可能不是图集作品）")
     return {"ok": True, "detail": detail}
 
 

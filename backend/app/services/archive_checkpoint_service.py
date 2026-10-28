@@ -586,7 +586,7 @@ def record_download_checkpoint(
             # 抖音图集：凭据文件必须为图片扩展名且一一对应（无重名）
             names = {Path(item.path).name for item in receipt_files}
             if len(names) != len(receipt_files) or any(
-                Path(item.path).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}
+                Path(item.path).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
                 for item in receipt_files
             ):
                 raise ValueError("image receipt does not cover the complete supported album")
