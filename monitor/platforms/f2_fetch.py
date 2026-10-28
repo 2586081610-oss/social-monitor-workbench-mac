@@ -64,17 +64,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_LOCK_HANDLE = None  # 保持锁文件句柄存活：函数返回后 GC 关闭 fd 会立即释放锁
+
+
 def acquire_lock(lock_path: str) -> None:
     if not lock_path:
         return
+    global _LOCK_HANDLE
     try:
         import fcntl
 
-        fh = open(lock_path, "w")  # noqa: SIM115 - 句柄需存活到进程退出
+        fh = open(lock_path, "w")  # noqa: SIM115 - 句柄须存活到进程退出（模块级引用）
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            fh.close()
             raise ScopeError("already_running", "已有一次同步在运行（锁被占用）")
+        _LOCK_HANDLE = fh
         return
     except ImportError:
         pass

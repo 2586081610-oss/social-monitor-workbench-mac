@@ -97,3 +97,20 @@ def test_browser_process_timeout_cleans_only_its_private_scratch(monkeypatch, tm
     with pytest.raises(download.PipelineOfflineError):
         download._download_douyin_browser('https://www.douyin.com/video/12345678', tmp_path)
     assert sorted(p.name for p in tmp_path.iterdir()) == ['keep.txt']
+
+
+def test_personal_source_sync_disables_browser_fallback(monkeypatch, tmp_path):
+    """个人来源（F2/DDR）自动下载不得打开或播放作品网页兜底：失败如实报错。"""
+    monkeypatch.setattr(download.sys, 'platform', 'darwin')
+    monkeypatch.setattr(download, '_invoke_downloader', lambda *args: None)  # 主下载器无输出
+    monkeypatch.setattr(
+        download, '_download_douyin_browser',
+        lambda *args: pytest.fail('personal-source works must not use the browser fallback'),
+        raising=False,
+    )
+    with pytest.raises(download.PipelineOfflineError):
+        download.download_with_result(
+            'douyin', 'https://www.douyin.com/video/12345678', tmp_path,
+            allow_browser_fallback=False,
+        )
+

@@ -196,18 +196,19 @@ def read_snapshot_f2(
     page_counts: int = 20,
 ) -> PersonalSnapshot:
     """通道 C：运行 F2 取数脚本并解析。入口由 personal_source_ingest 调用。"""
-    runtime = resolve_runtime_dir(runtime_dir)
-    python = runtime_python(runtime)
-    script = Path(__file__).resolve().parent / "f2_fetch.py"
     cookie_path = resolve_cookie_file(cookie_file)
     if not cookie_path.is_file():
         raise PersonalSourceError(
             "login_required",
             f"未找到抖音登录态文件: {cookie_path}（设置 {COOKIE_FILE_ENV} 或先由用户完成登录导出）",
         )
+    runtime = resolve_runtime_dir(runtime_dir)
+    python = runtime_python(runtime)
+    script = Path(__file__).resolve().parent / "f2_fetch.py"
 
     workspace_root = Path(__file__).resolve().parents[2]
-    log_dir = workspace_root / LOG_RELATIVE_DIR
+    # 与 app.core.config 一致：WORKBUDDY_DIR 可覆盖（测试隔离依赖）
+    log_dir = Path(os.getenv("WORKBUDDY_DIR") or (workspace_root / "workbuddy")) / "f2"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "fetch.log"
     lock_path = log_dir / "sync.lock"
