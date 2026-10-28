@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 # 先导入 shared_db（把 backend 加入 sys.path），再导入 app.* 与 monitor.*
@@ -296,28 +296,68 @@ def poll_xhs_creator(creator_id: int) -> None:
         db.commit()
 
 
+def write_personal_heartbeat() -> None:
+    """个人任务进程（personal_worker）独立心跳：只运行已授权个人任务时在线。
+
+    与监控层心跳分开：个人任务进程不注册 RSSHub/博主轮询，不应让页面误判
+    "监控层在线"（那意味着其他平台轮询也在跑）。
+    """
+    settings.workbuddy_dir.mkdir(parents=True, exist_ok=True)
+    (settings.workbuddy_dir / "personal_worker_heartbeat.json").write_text(
+        json.dumps({"ts": time.time(), "pid": os.getpid()}), encoding="utf-8"
+    )
+
+
+def personal_source_download_locks(db: Session) -> int:
+    """个人来源下载积压数（兼容入口；实现在 app.services.personal_source_service）。"""
+    from app.services import personal_source_service
+
+    return personal_source_service.count_download_locks(db)
+
+
 def download_personal_source_works(*, limit: int = 10) -> int:
     """个人来源自动下载（独立授权开关控制，默认关）。
 
-    只处理**个人来源事实覆盖**的作品：source_type=personal_source，或已被
-    personal_source_marks 关联的跨来源作品（先被博主监控登记、后被 F2 发现）。
-    下载任务来源决定兜底策略：本步骤**一律禁用**浏览器播放兜底，失败如实标记。
-    绝不触碰其他来源的队列。
-    """
-    from app.models import PersonalSourceMark
-    from sqlalchemy import or_
+    授权在函数内部再次校验：douyin_personal_auto_download 关闭时零处理，
+    任何调用方都无法绕过。
 
-    processed = 0
+    只处理**个人来源事实覆盖**的作品（按作品去重，EXISTS 判定）：
+    - source_type=personal_source（F2/DDR 登记，含夹内-only 作品）；
+    - 被 personal_source_marks 关联（点赞/收藏事实，跨来源或同来源）；
+    - 被 personal_source_folder_items 关联（仅收藏夹归属的跨来源作品）。
+    状态含 NEW 与 QUEUED：监控来源登记的作品会被置 QUEUED，全局队列关闭时
+    由本步骤在授权下继续处理。下载任务来源决定兜底策略：本步骤**一律禁用**
+    浏览器播放兜底，失败如实标记。绝不触碰其他来源的队列。
+    """
+    from app.models import PersonalSourceFolderItem, PersonalSourceMark
+    from app.services import personal_source_service
+    from sqlalchemy import exists, or_
+
     with SessionLocal() as db:
-        works = db.execute(
-            select(Work)
-            .outerjoin(PersonalSourceMark, PersonalSourceMark.work_id == Work.id)
-            .where(Work.status == "NEW")
-            .where(or_(Work.source_type == "personal_source", PersonalSourceMark.id.isnot(None)))
+        config = personal_source_service.read_config(db)
+        if not config.auto_download:
+            return 0
+        selected = db.execute(
+            select(Work.id)
+            .where(Work.status.in_(["NEW", "QUEUED"]))
+            .where(
+                or_(
+                    Work.source_type == "personal_source",
+                    exists().where(PersonalSourceMark.work_id == Work.id),
+                    exists().where(PersonalSourceFolderItem.work_id == Work.id),
+                )
+            )
             .order_by(Work.id)
             .limit(limit)
         ).scalars().all()
-        for work in works:
+
+    processed = 0
+    for work_id in selected:
+        with SessionLocal() as db:
+            # 处理前重读状态：全局流水线或重试可能已改变它，避免重复处理
+            work = db.get(Work, work_id)
+            if work is None or work.status not in ("NEW", "QUEUED"):
+                continue
             try:
                 _process_work(db, work, write_pending=True, allow_browser_fallback=False)
                 db.commit()
@@ -328,7 +368,8 @@ def download_personal_source_works(*, limit: int = 10) -> int:
                 work.last_error = str(exc)
                 task_repo.mark_failed(db, work.id, failed_stage, str(exc))
                 db.commit()
-                logger.warning("personal-source work %s download offline: %s", work.id, exc)
+                logger.warning("personal-source work download offline: work_id=%s error_type=%s",
+                               work.id, type(exc).__name__)
             except Exception as exc:  # noqa: BLE001
                 failed_stage = {
                     "DOWNLOADING": "download",
@@ -339,19 +380,22 @@ def download_personal_source_works(*, limit: int = 10) -> int:
                 work.last_error = str(exc)
                 task_repo.mark_failed(db, work.id, failed_stage, str(exc))
                 db.commit()
-                logger.exception("personal-source work %s pipeline failed", work.id)
+                logger.warning("personal-source work pipeline failed: work_id=%s error_type=%s",
+                               work.id, type(exc).__name__)
     return processed
 
 
 def check_douyin_personal_sync() -> None:
-    """定时发现本人新增作品（F2 通道）：读 app_settings 配置，默认关闭。
+    """个人来源定时任务 tick：同步到期间隔执行；下载积压每个 tick 都消费。
 
-    配置由前端 /api/v1/personal-source/schedule 维护（enabled/interval/scopes），
-    本任务每分钟检查一次，到期才执行，因此不重启监控层也能生效；不会隐式启动。
-    到期判断基于最近一次同步（含失败）的开始时间，手动同步也计入，避免重叠；
-    并发兜底依赖 F2 取数脚本的文件锁。失败如实写 poll_logs，不让调度线程死亡。
-    自动下载是独立授权（douyin_personal_auto_download，默认关）：开启后仅对
-    个人来源事实覆盖的作品执行下载，不影响其他来源队列。
+    配置由前端 /api/v1/personal-source/schedule 维护，默认全关、不会隐式启动。
+    同步与下载是两项独立授权（enabled / auto_download），互不牵制：
+    - 同步到期判断基于最近一次同步（含失败）的开始时间，手动同步也计入，避免重叠；
+      并发兜底依赖 F2 取数脚本的文件锁。
+    - 下载积压每个 tick 消费一小批（默认 10），不随同步间隔排队——手动同步
+      （--download）也会即时消费。
+    - 同步失败不影响已授权积压的消费（失败如实记录，不让调度线程死亡）。
+    日志只记数量与类别，不写作品/收藏夹/账号标识。
     """
     from app.services import personal_source_service
     from app.utils.timeutil import parse_iso
@@ -360,29 +404,34 @@ def check_douyin_personal_sync() -> None:
     try:
         with SessionLocal() as db:
             config = personal_source_service.read_config(db)
-            if not config.enabled:
-                return
-            last_started = personal_source_service.last_sync_started_at(db)
-        if last_started:
-            last = parse_iso(last_started)
-            if last is None:
-                logger.warning("个人来源同步：无法解析上次时间 %r，按已到期处理", last_started)
-            else:
-                elapsed_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
-                if elapsed_minutes < config.interval_minutes:
-                    return
-        logger.info("个人来源定时同步到期，开始执行（scopes=%s）", config.scopes)
-        report = personal_source_ingest.run_ingest("f2")
-        logger.info(
-            "个人来源同步完成: 新作品 %s，marks 新增 %s，归属新增 %s，完整性=%s",
-            report.works_created, report.marks_created, report.folder_items_created,
-            ",".join(report.incomplete_lists) or "complete",
-        )
+        if not (config.enabled or config.auto_download):
+            return
+        if config.enabled:
+            due = True
+            with SessionLocal() as db:
+                last_started = personal_source_service.last_sync_started_at(db)
+            if last_started:
+                last = parse_iso(last_started)
+                if last is not None:
+                    elapsed_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
+                    due = elapsed_minutes >= config.interval_minutes
+                else:
+                    logger.warning("个人来源同步：无法解析上次时间，按已到期处理")
+            if due:
+                logger.info("个人来源定时同步到期，开始执行")
+                report = personal_source_ingest.run_ingest("f2")
+                logger.info(
+                    "个人来源同步完成: 新作品 %s，marks 新增 %s，归属新增 %s，不完整项 %s",
+                    report.works_created, report.marks_created, report.folder_items_created,
+                    len(report.incomplete_lists),
+                )
         if config.auto_download:
             processed = download_personal_source_works()
-            logger.info("个人来源自动下载处理 %s 个作品", processed)
+            if processed:
+                logger.info("个人来源自动下载处理 %s 个作品", processed)
     except Exception as exc:  # noqa: BLE001 - 同步失败只记录，不中断调度
-        logger.warning("个人来源定时同步失败: %s", exc)
+        logger.warning("个人来源定时任务失败: error_type=%s detail=%s",
+                       type(exc).__name__, str(exc)[:160])
 
 
 def consume_triggers() -> None:

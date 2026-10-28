@@ -186,8 +186,9 @@ def parse_f2_result(
             snapshot.folder_incomplete.append("folders")
         folder_incomplete = collects.get("folder_incomplete")
         if isinstance(folder_incomplete, list):
+            # 只接受序号形式（folder#2），真实收藏夹 ID 不得进入日志/报告
             snapshot.folder_incomplete.extend(
-                f for f in folder_incomplete if isinstance(f, str) and f.startswith("folder:")
+                f for f in folder_incomplete if isinstance(f, str) and f.startswith("folder#")
             )
 
     for block in (result.get("collects", {}).get("folder_items") or {}).values() if want_collections else ():

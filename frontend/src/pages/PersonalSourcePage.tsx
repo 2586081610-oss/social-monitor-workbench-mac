@@ -97,8 +97,8 @@ export default function PersonalSourcePage() {
           ? `定时发现开启，每 ${saved.interval_minutes} 分钟检查一次新增`
           : '定时发现保持关闭（手动同步仍可用）',
       );
-      if (saved.enabled && !statusQuery.data?.monitor_online) {
-        parts.push('注意：监控层当前未运行，定时不会执行（用 start_all.sh 或 python monitor/main.py 启动监控层）');
+      if (saved.enabled && !statusQuery.data?.schedule_active) {
+        parts.push('注意：当前没有任务进程在运行，定时不会执行（单独运行 python -m monitor.personal_worker，只执行已授权的个人任务）');
       }
       parts.push(saved.auto_download ? '个人来源自动下载已授权（仅处理个人来源作品）' : '个人来源自动下载保持关闭');
       setSaveMsg({ ok: true, text: `已保存：${parts.join('；')}` });
@@ -155,18 +155,22 @@ export default function PersonalSourcePage() {
             missingLabel="sec_user_id 未填（点赞列表不可用）"
           />
           <Readiness
-            ok={!!status?.monitor_online}
-            okLabel="监控层在线"
-            missingLabel="监控层未运行"
+            ok={!!status?.monitor_online || !!status?.personal_worker_online}
+            okLabel={status?.personal_worker_online ? '个人任务进程在线' : '监控层在线'}
+            missingLabel="个人任务进程未运行"
           />
           <Readiness
             ok={!!status?.schedule_active}
             okLabel="定时执行中"
-            missingLabel={status?.schedule?.enabled ? '定时已开启但监控层未运行，暂不执行' : '定时未开启'}
+            missingLabel={
+              status?.schedule?.enabled
+                ? '定时已开启但没有任何任务进程运行，暂不执行'
+                : '定时未开启'
+            }
           />
           <Readiness
             ok={!!status?.schedule?.auto_download}
-            okLabel="个人来源自动下载已授权"
+            okLabel={`个人来源自动下载已授权${status?.pending_download_count ? `（待下载 ${status.pending_download_count}）` : ''}`}
             missingLabel="个人来源自动下载关闭"
           />
         </div>
@@ -193,10 +197,11 @@ export default function PersonalSourcePage() {
             不启动其他来源的全局队列）；全局流水线（环境变量 MONITOR_RUN_PIPELINE={String(!!status?.pipeline_enabled)}）
             与之相互独立。下载失败会如实标注原因，不会打开或播放作品网页兜底。
           </p>
-          {enabled && !status?.monitor_online ? (
+          {enabled && !status?.schedule_active ? (
             <p className="mt-1 text-warning">
-              定时发现已开启但监控层未运行：请用 start_all.sh（含监控层）或单独运行
-              python monitor/main.py 后定时才会执行。
+              定时发现已开启但没有任何任务进程在运行。start_all.sh 只启动前后端、不含定时任务；
+              请单独运行个人任务进程：python -m monitor.personal_worker
+              （只执行已授权的个人同步/下载，不启动其他平台轮询）。
             </p>
           ) : null}
         </div>

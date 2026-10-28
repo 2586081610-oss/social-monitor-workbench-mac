@@ -1,12 +1,13 @@
 """真实 F2 运行时回归检查（在 tools/f2-runtime/.venv 内由 pytest 以子进程运行）。
 
-用**真实 F2 Filter 与 handler 生成器**（网络打桩）验证消费层语义，避免只用
-属性语义不同的假页面：
+用**真实 F2 Filter、handler 与底层 crawler**（网络打桩）验证消费层语义，
+避免只用属性语义不同的假页面：
 - 真实 UserPostFilter 把缺失 has_more 强转 False → 必须看原始响应键；
-- 真实生成器上游提前结束（yield 前异常被吞）→ 0 页必须显式失败；
-- 平台 status_code=8 → login_expired；
-- 夹级/整体不完整状态如实传播；
-- 真实 F2 异常类的翻译与消息脱敏。
+- 夹内作品逐页直读 crawler 原始响应：合法空夹 / 夹内 status_code=8 →
+  login_expired / 下一页为空 / 多夹混合（一个空夹不中断其他夹）；
+- 真实 F2 异常类的翻译与消息脱敏；
+- 点赞范围缺 sec_user_id 提前报错。
+合成 cookie 写入 tempfile，绝不写真实业务目录。网络全程打桩，无真实请求。
 
 输出 JSON：{"ok": true/false, "checks": {...}, "failures": [...]}
 """
@@ -16,6 +17,7 @@ import asyncio
 import json
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
@@ -92,7 +94,7 @@ async def main() -> dict:
         page_counts=2)
     check("oversize_counted", meta["server_oversize_pages"] == 1 and len(works) == 5, f"meta={meta}")
 
-    # 4. 真实 handler 生成器（网络桩）：收藏夹 status_code=8 → login_expired
+    # 4. 真实 handler 生成器（网络桩）：收藏夹列表 status_code=8 → login_expired
     handler = DouyinHandler({
         "headers": {"User-Agent": "UA"}, "cookie": "a=b", "timeout": 0, "max_retries": 1,
         "proxies": {"http://": None, "https://": None},
@@ -103,7 +105,7 @@ async def main() -> dict:
 
     DouyinCrawler.fetch_user_collects = fake_collects_login
     args = type("Args", (), {"page_counts": 20, "max_items_per_list": 100,
-                             "max_pages_per_list": 50, "folder_ids": ""})()
+                             "max_pages_per_list": 50, "folder_ids": "", "timeout": 0})()
     result: dict = {}
     try:
         await fetch.fetch_collections_scope(handler, args, result, [])
@@ -113,38 +115,73 @@ async def main() -> dict:
     check("collects_status_8", checks["collects_status_8"] == "login_expired",
           str(checks["collects_status_8"]))
 
-    # 5. 真实 handler 生成器：正常路径（1 夹 5 作品，完整结束）
-    async def fake_collects_ok(self, params):
-        return {"status_code": 0, "collects_list": [{"collects_id": "f1", "collects_name": "夹A"}], "has_more": 0}
+    # 5. 夹内作品逐页直读 crawler 原始响应（复审项 3 的四个场景）
+    #    5a. 多夹混合：空夹（合法）+ 有作品夹 + 下一页为空 —— 全部完成，空夹不中断
+    async def fake_collects_two(self, params):
+        return {"status_code": 0,
+                "collects_list": [{"collects_id": "FAKEFOLDERID1", "collects_name": "空夹"},
+                                  {"collects_id": "FAKEFOLDERID2", "collects_name": "有货"}],
+                "has_more": 0}
 
-    async def fake_folder_ok(self, params):
-        return {"status_code": 0, "aweme_list": [_aweme(i) for i in range(5)], "has_more": 0}
+    folder_page_state = {"n": 0}
 
-    DouyinCrawler.fetch_user_collects = fake_collects_ok
-    DouyinCrawler.fetch_user_collects_video = fake_folder_ok
+    async def fake_folder_pages_mixed(self, params):
+        # FAKEFOLDERID1：合法空夹（aweme_list=[]，has_more=0）
+        if params.collects_id == "FAKEFOLDERID1":
+            return {"status_code": 0, "aweme_list": [], "has_more": 0}
+        # FAKEFOLDERID2：第一页 2 条 has_more=1，第二页空 has_more=0（下一页为空）
+        folder_page_state["n"] += 1
+        if folder_page_state["n"] == 1:
+            return {"status_code": 0, "aweme_list": [_aweme(1), _aweme(2)], "has_more": 1, "cursor": 2}
+        return {"status_code": 0, "aweme_list": [], "has_more": 0}
+
+    DouyinCrawler.fetch_user_collects = fake_collects_two
+    DouyinCrawler.fetch_user_collects_video = fake_folder_pages_mixed
     result = {}
-    await fetch.fetch_collections_scope(handler, args, result, [])
+    warn5: list[str] = []
+    await fetch.fetch_collections_scope(handler, args, result, warn5)
     block = result["collects"]
-    check("collects_happy_path", block["complete"] is True and block["folders_complete"] is True
-          and block["folder_incomplete"] == [] and block["folder_items"]["f1"]["items"] == 5,
-          f"block={ {k: v for k, v in block.items() if k != 'folder_items'} }")
+    check("folder_empty_is_legit_and_mixed_complete",
+          block["complete"] is True
+          and block["folder_items"]["FAKEFOLDERID1"]["items"] == 0
+          and block["folder_items"]["FAKEFOLDERID1"]["complete"] is True
+          and block["folder_items"]["FAKEFOLDERID2"]["items"] == 2
+          and block["folder_incomplete"] == [],
+          f"complete={block['complete']} items={ {k: v['items'] for k, v in block['folder_items'].items()} }")
+    check("folder_labels_no_real_ids",
+          all("FAKEFOLDERID" not in w for w in warn5)
+          and all("FAKEFOLDERID" not in i for i in block["folder_incomplete"]),
+          f"warnings={warn5} incomplete={block['folder_incomplete']}")
 
-    # 6. 真实 handler 生成器：夹内作品分页一直 has_more=1 → 页数上限 → 不完整传播
-    async def fake_folder_endless(self, params):
-        return {"status_code": 0, "aweme_list": [_aweme(1)], "has_more": 1}
+    #    5b. 夹内 status_code=8 → login_expired（此前经生成器无法到达该分支）
+    async def fake_folder_status8(self, params):
+        return {"status_code": 8, "aweme_list": [], "has_more": 0}
 
-    DouyinCrawler.fetch_user_collects_video = fake_folder_endless
-    capped_args = type("Args", (), {"page_counts": 20, "max_items_per_list": 100,
-                                    "max_pages_per_list": 2, "folder_ids": ""})()
+    DouyinCrawler.fetch_user_collects_video = fake_folder_status8
     result = {}
-    warn2: list[str] = []
-    await fetch.fetch_collections_scope(handler, capped_args, result, warn2)
-    block = result["collects"]
-    check("collects_incomplete_propagated", block["complete"] is False
-          and "folder:f1" in block["folder_incomplete"] and block["folders_complete"] is True,
-          f"complete={block['complete']} incomplete={block['folder_incomplete']}")
+    try:
+        await fetch.fetch_collections_scope(handler, args, result, [])
+        checks["folder_status_8"] = "NO_ERROR_BAD"
+    except fetch.ScopeError as exc:
+        checks["folder_status_8"] = exc.kind
+    check("folder_status_8", checks["folder_status_8"] == "login_expired",
+          str(checks["folder_status_8"]))
 
-    # 7. 真实 F2 异常类翻译 + 脱敏
+    #    5c. 夹内响应缺 aweme_list → platform_error
+    async def fake_folder_no_list(self, params):
+        return {"status_code": 0, "has_more": 0}
+
+    DouyinCrawler.fetch_user_collects_video = fake_folder_no_list
+    result = {}
+    try:
+        await fetch.fetch_collections_scope(handler, args, result, [])
+        checks["folder_missing_aweme_list"] = "NO_ERROR_BAD"
+    except fetch.ScopeError as exc:
+        checks["folder_missing_aweme_list"] = exc.kind
+    check("folder_missing_aweme_list", checks["folder_missing_aweme_list"] == "platform_error",
+          str(checks["folder_missing_aweme_list"]))
+
+    # 6. 真实 F2 异常类翻译 + 脱敏
     from f2.exceptions.api_exceptions import (
         APIRateLimitError,
         APIRetryExhaustedError,
@@ -162,31 +199,30 @@ async def main() -> dict:
     err = fetch.scope_error_from_exception(APIRateLimitError("x"), "like", "like")
     check("rate_limited", err.kind == "rate_limited", err.kind)
 
-    # 8. 点赞范围缺 sec_user_id → 提前明确报错（不联网）
-    cookie_file = Path(WORKSPACE_ROOT) / "workbuddy" / "f2" / "_synthetic_cookie_check.txt"
-    cookie_file.parent.mkdir(parents=True, exist_ok=True)
-    cookie_file.write_text("sessionid=synthetic", encoding="utf-8")
-    ns = type("Args", (), {})()
-    ns.cookie_file = str(cookie_file)
-    ns.output = str(cookie_file.parent / "_out.json")
-    ns.scopes = "like"
-    ns.sec_user_id = ""
-    ns.folder_ids = ""
-    ns.page_counts = 20
-    ns.max_items_per_list = 100
-    ns.max_pages_per_list = 50
-    ns.budget_seconds = 10
-    ns.timeout = 1
-    ns.max_retries = 1
-    ns.lock_file = ""
-    try:
-        await fetch.run_scopes(ns)
-        checks["like_missing_sec_user_id"] = "NO_ERROR_BAD"
-    except fetch.ScopeError as exc:
-        checks["like_missing_sec_user_id"] = exc.kind
+    # 7. 点赞范围缺 sec_user_id → 提前明确报错（不联网；cookie 写入 tempfile）
+    with tempfile.TemporaryDirectory(prefix="f2-runtime-check-") as tmp:
+        cookie_file = Path(tmp) / "cookie.txt"
+        cookie_file.write_text("sessionid=synthetic", encoding="utf-8")
+        ns = type("Args", (), {})()
+        ns.cookie_file = str(cookie_file)
+        ns.output = str(Path(tmp) / "_out.json")
+        ns.scopes = "like"
+        ns.sec_user_id = ""
+        ns.folder_ids = ""
+        ns.page_counts = 20
+        ns.max_items_per_list = 100
+        ns.max_pages_per_list = 50
+        ns.budget_seconds = 10
+        ns.timeout = 1
+        ns.max_retries = 1
+        ns.lock_file = ""
+        try:
+            await fetch.run_scopes(ns)
+            checks["like_missing_sec_user_id"] = "NO_ERROR_BAD"
+        except fetch.ScopeError as exc:
+            checks["like_missing_sec_user_id"] = exc.kind
     check("like_missing_sec_user_id", checks["like_missing_sec_user_id"] == "missing_sec_user_id",
           str(checks["like_missing_sec_user_id"]))
-    cookie_file.unlink(missing_ok=True)
 
     return {"ok": not failures, "checks": checks, "failures": failures}
 

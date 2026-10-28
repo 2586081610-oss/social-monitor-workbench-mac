@@ -384,27 +384,25 @@ async def fetch_collections_scope(handler, args, result: dict, warnings: list) -
     folder_incomplete: list[str] = []
     all_items_complete = folders_complete
     first = True
-    for folder_id in folders:
+    for ordinal, folder_id in enumerate(folders, start=1):
         if wanted and folder_id not in wanted:
             continue
         if not first:
             await asyncio.sleep(1)
         first = False
+        # 日志/不完整清单只允许序号，不允许真实收藏夹 ID
+        label = f"收藏夹#{ordinal}"
         try:
-            works, meta = await consume_video_pages(
-                lambda h, fid=folder_id: handler.fetch_user_collects_videos(
-                    fid, page_counts=args.page_counts, max_counts=args.max_items_per_list),
-                label=f"folder:{folder_id}", requested_page_counts=args.page_counts,
-                max_pages=args.max_pages_per_list, max_items=args.max_items_per_list,
-                warnings=warnings,
+            works, meta = await _fetch_folder_items_raw(
+                handler, folder_id, label=label, args=args, warnings=warnings,
             )
         except ScopeError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise scope_error_from_exception(exc, f"folder:{folder_id}", "collections") from None
+            raise scope_error_from_exception(exc, label, "collections") from None
         folder_items[folder_id] = meta | {"works": works}
         if not meta["complete"]:
-            folder_incomplete.append(f"folder:{folder_id}")
+            folder_incomplete.append(f"folder#{ordinal}")
             all_items_complete = False
     result["collects"] = {
         "pages": pages,
@@ -414,6 +412,90 @@ async def fetch_collections_scope(handler, args, result: dict, warnings: list) -
         "folder_incomplete": folder_incomplete,
         "complete": all_items_complete and bool(pages),
     }
+
+
+async def _fetch_folder_items_raw(handler, folder_id: str, *, label: str, args, warnings: list):
+    """逐页直读爬虫原始响应获取夹内作品（不经过 handler 生成器）。
+
+    真实 F2 的 `fetch_user_collects_videos` 生成器对空 `aweme_list` 在 yield 前
+    就结束，无法区分"合法空夹"与"上游失败"。这里直接调用底层 crawler 并对原始
+    响应严格校验：
+    - status_code=8 → login_expired（夹内登录失效正确分类）；
+    - aweme_list 缺失/非列表 → platform_error；
+    - `aweme_list=[]` 且 has_more=0 → 合法空夹（complete，继续其他夹）；
+    - has_more 键缺失 → 不完整；页数/条数预算 → 不完整。
+    """
+    from f2.apps.douyin.crawler import DouyinCrawler
+    from f2.apps.douyin.model import UserCollectsVideo
+
+    works: list[dict] = []
+    seen: set[str] = set()
+    skipped: list[dict] = []
+    pages = 0
+    oversize_pages = 0
+    finished_cleanly = False
+    stopped_by_budget = False
+    has_more_missing = False
+    cursor = 0
+
+    async with DouyinCrawler(handler.kwargs) as crawler:
+        while True:
+            params = UserCollectsVideo(
+                cursor=cursor, count=int(args.page_counts), collects_id=str(folder_id),
+            )
+            response = await crawler.fetch_user_collects_video(params)
+            pages += 1
+            status_code = response.get("status_code") if isinstance(response, dict) else None
+            status_error = _payload_status_kind(status_code)
+            if status_error is not None:
+                raise ScopeError(status_error[0], f"{label} {status_error[1]}")
+            if not isinstance(response, dict) or "aweme_list" not in response \
+                    or not isinstance(response.get("aweme_list"), list):
+                raise ScopeError("platform_error", f"{label} 响应缺少 aweme_list 字段")
+            aweme_list = response["aweme_list"]
+            if len(aweme_list) > args.page_counts:
+                oversize_pages += 1
+            for entry in aweme_list:
+                work, skip = extract_work(entry)
+                if work is None:
+                    skipped.append({"list": label, **(skip or {})})
+                elif work["external_id"] not in seen:
+                    seen.add(work["external_id"])
+                    works.append(work)
+            if "has_more" not in response:
+                warnings.append(f"{label} 第 {pages} 页未返回 has_more，按不完整处理")
+                has_more_missing = True
+                break
+            if not response["has_more"]:
+                finished_cleanly = True
+                break
+            if pages >= args.max_pages_per_list:
+                warnings.append(f"{label} 达到页数上限 {args.max_pages_per_list}，列表可能不完整")
+                stopped_by_budget = True
+                break
+            if len(works) >= args.max_items_per_list:
+                warnings.append(f"{label} 达到条数上限 {args.max_items_per_list}，列表可能不完整")
+                stopped_by_budget = True
+                break
+            next_cursor = response.get("cursor")
+            cursor = int(next_cursor) if isinstance(next_cursor, (int, float)) else 0
+            await asyncio.sleep(max(0, int(args.timeout)))
+
+    if pages == 0:
+        # crawler 调用循环至少执行一次，除非构造即失败——这里只可能是异常路径
+        raise ScopeError("platform_error", f"{label} 未返回任何数据页")
+    if not finished_cleanly and not stopped_by_budget and not has_more_missing:
+        warnings.append(f"{label} 上游在 has_more=1 时提前结束，按不完整处理")
+    meta = {
+        "pages": pages,
+        "items": len(works),
+        "complete": finished_cleanly,
+        "server_oversize_pages": oversize_pages,
+    }
+    if skipped:
+        meta["skipped"] = skipped[:20]
+        meta["skipped_count"] = len(skipped)
+    return works, meta
 
 
 def write_output(path: str, doc: dict) -> None:

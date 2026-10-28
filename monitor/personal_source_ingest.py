@@ -71,6 +71,23 @@ class IngestReport:
     def to_dict(self) -> dict:
         return dict(self.__dict__)
 
+    def to_safe_dict(self) -> dict:
+        """日志/CLI 输出用：只含类别与数量，不含作品/收藏夹/账号标识。
+
+        - works_publication_filled（作品 ID 列表）→ 数量
+        - skipped_invalid（含原始 ID 片段）→ 数量
+        - incomplete_lists（folder:<真实夹 ID>）→ 夹计数
+        """
+        data = self.to_dict()
+        data["works_publication_filled"] = len(self.works_publication_filled)
+        data["skipped_invalid_count"] = len(self.skipped_invalid)
+        data.pop("skipped_invalid", None)
+        folder_incomplete = sum(1 for i in self.incomplete_lists if i.startswith("folder"))
+        list_incomplete = [i for i in self.incomplete_lists if not i.startswith("folder")]
+        data["incomplete_lists"] = list_incomplete + ([f"folder×{folder_incomplete}"] if folder_incomplete else [])
+        data["download_processed"] = getattr(self, "download_processed", None)
+        return data
+
 
 def _guarded_publication_fill(work, item: PersonalItem) -> bool:
     """已存在作品只允许补全空缺的发布时间四件套；任何已有可信值都不碰。"""
@@ -398,13 +415,20 @@ def main() -> int:
     parser.add_argument("--account", default=None, help="多账号时的账号目录名")
     parser.add_argument("--base-dir", default=None, help="覆盖 DDR 数据目录")
     parser.add_argument("--dry-run", action="store_true", help="解析并生成报告，不写库")
+    parser.add_argument("--download", action="store_true",
+                        help="成功导入后消费已授权的下载积压（douyin_personal_auto_download 控制，默认零处理）")
     args = parser.parse_args()
     try:
         report = run_ingest(args.source, account=args.account, base_dir=args.base_dir, dry_run=args.dry_run)
+        if args.download and not args.dry_run:
+            from monitor.jobs import download_personal_source_works
+
+            report.download_processed = download_personal_source_works()
     except PersonalSourceError as exc:
         print(json.dumps({"status": "error", "kind": exc.kind, "message": str(exc)}, ensure_ascii=False))
         return 1
-    print(json.dumps({"status": "ok", **report.to_dict()}, ensure_ascii=False, indent=1))
+    # 安全输出：只含类别与数量，不含作品/收藏夹/账号标识（子进程输出会被留存在手动日志）
+    print(json.dumps({"status": "ok", **report.to_safe_dict()}, ensure_ascii=False, indent=1))
     return 0
 
 

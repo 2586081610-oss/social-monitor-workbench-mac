@@ -12,15 +12,19 @@ export interface PersonalSourceStatus {
     sec_user_id: string;
     auto_download: boolean;
   };
-  /** 监控层是否在线（心跳）；定时只在监控层运行时才会执行 */
+  /** 监控层是否在线（心跳）；含 RSSHub/博主轮询等全部监控任务 */
   monitor_online: boolean;
-  /** 定时是否真的会执行 = enabled 且监控层在线 */
+  /** 个人任务进程（python -m monitor.personal_worker）是否在线；只运行已授权个人任务 */
+  personal_worker_online: boolean;
+  /** 定时是否真的会执行 = enabled 且（监控层在线 或 个人任务进程在线） */
   schedule_active: boolean;
   sec_user_id_set: boolean;
   cookie_file_set: boolean;
   runtime_available: boolean;
   /** 全局流水线（环境变量 MONITOR_RUN_PIPELINE），与个人来源自动下载相互独立 */
   pipeline_enabled: boolean;
+  /** 已授权下载的待处理积压数 */
+  pending_download_count: number;
   last_sync: {
     finished_at: string | null;
     status: string;

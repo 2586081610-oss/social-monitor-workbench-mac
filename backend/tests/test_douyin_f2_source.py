@@ -256,7 +256,7 @@ else:
     if "collections" in scopes:
         doc["collects"] = {{
             "complete": not incomplete, "pages": 1, "folders_complete": True,
-            "folder_incomplete": ["folder:f1"] if incomplete else [],
+            "folder_incomplete": ["folder#1"] if incomplete else [],
             "folders": [{{"folder_id": "f1", "name": "夹A"}}, {{"folder_id": "f2", "name": "夹B"}}],
             "folder_items": {{
                 "f1": {{"complete": not incomplete, "works": [_work("8000001"), _work("7000001")]}},
@@ -406,11 +406,14 @@ def test_cli_f2_incomplete_sync_records_partial_not_success(tmp_path):
     )
     assert result.returncode == 0, result.stderr[-400:]
     report = _json.loads(result.stdout)
-    assert "collection" in report["incomplete_lists"]
-    assert "folder:f1" in report["incomplete_lists"]
+    assert report["incomplete_lists"].count("collection") == 1
+    assert report["incomplete_lists"] == ["collection", "folder×1"] or "folder×1" in report["incomplete_lists"]
+    assert not any("8000001" in part or "f1" == part for part in report["incomplete_lists"])
     with sqlite3.connect(tmp_path / "cli.db") as conn:
         row = conn.execute(
             "SELECT status, detail FROM poll_logs WHERE platform='douyin-personal' ORDER BY id DESC LIMIT 1"
         ).fetchone()
     assert row is not None and row[0] == "partial"
-    assert "collection" in row[1] and "folder:f1" in row[1]
+    assert "collection" in row[1] and "folder#" in row[1]
+    assert "8000001" not in (row[1] or "")  # 日志不含作品 ID
+    assert "f1" not in (row[1] or "").replace("folder#", "")  # 日志不含真实收藏夹 ID

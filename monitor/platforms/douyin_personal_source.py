@@ -32,25 +32,37 @@ _RECORD_TYPE_TO_MARK = {"liked_videos": "like", "favorite_videos": "favorite"}
 _DEFAULT_DATA_DIR = Path.home() / "Library" / "Application Support" / "内容数据工作台" / "collector" / ".local-data"
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
-# 凭据/标识脱敏：登录态参数、签名参数与本人 sec_uid 模式（错误消息/日志统一过这里）
+# 凭据/标识脱敏（兜底层；错误文案本身按白名单构造，不依赖这里罗列秘密键）
 _SECRET_PARAM_RE = re.compile(
     r"(?i)\b(ms_token|mstoken|a_bogus|verify_fp|verifyfp|s_v_web_id|webid|ttwid|odin_tt|"
     r"passport_csrf_token|sessionid|sessionid_ss|sid_tt|sid_guard|uid_tt|uiinput|"
     r"cookie|authorization|token|signature|sign|auth|key|credential)"
-    r"(\s*[=:]\s*)(\"?)[^&'\"\s,;)}\]]+"
+    r"(\s*[=:]\s*)(\"?)[^&'\"\s,;)}\]]*"
 )
+# Cookie/Authorization 头整值（含多个分号分隔的键值对）
+_COOKIE_HEADER_RE = re.compile(r"(?i)\bcookie\s*:\s*[^\r\n]+")
+_BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}")
+# URL 查询串整体（携带 msToken/a_bogus 等签名参数，不逐键罗列）
+_URL_QUERY_RE = re.compile(r"\?[^'\"\s<>]+")
+# 本人 sec_uid 与较长收藏夹/作品标识（日志中一律不出现）
 _SEC_UID_RE = re.compile(r"\bMS4wLjABAA[A-Za-z0-9_-]{8,}")
+_LONG_NUMERIC_ID_RE = re.compile(r"(?i)\b(folder)[:#]?\s*\d{10,}")
 
 
 def redact_sensitive_text(text: str, *, max_length: int = 300) -> str:
-    """脱敏错误消息/日志：抹去凭据类参数值与本人 sec_uid，超长截断。
+    """脱敏错误消息/日志：抹去凭据值、URL 查询串与本人/收藏夹标识，超长截断。
 
     适用于异常 str()、上游输出、poll_logs detail——凭据、账号标识不得落入日志与 UI。
+    注意：错误文案的主防线是白名单式构造（只含 kind/类别/数量），本函数是兜底。
     """
     if not isinstance(text, str):
         text = str(text)
-    redacted = _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    redacted = _COOKIE_HEADER_RE.sub("Cookie: <redacted>", text)
+    redacted = _BEARER_RE.sub(r"\1 <redacted>", redacted)
+    redacted = _URL_QUERY_RE.sub("?<redacted>", redacted)
+    redacted = _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", redacted)
     redacted = _SEC_UID_RE.sub("<sec_uid>", redacted)
+    redacted = _LONG_NUMERIC_ID_RE.sub(r"\1<id>", redacted)
     if len(redacted) > max_length:
         redacted = redacted[:max_length] + "…<截断>"
     return redacted

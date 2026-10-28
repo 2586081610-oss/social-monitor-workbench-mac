@@ -19,7 +19,14 @@ SCHEDULE_URL = "/api/v1/personal-source/schedule"
 STATUS_URL = "/api/v1/personal-source/status"
 
 
-def test_default_schedule_is_disabled(client, auth_headers):
+def _clear_personal_sync_logs(db) -> None:
+    """共享测试库：先清掉 douyin-personal 轮询日志，断言只针对本用例写入。"""
+    db.query(PollLog).filter_by(platform="douyin-personal").delete()
+    db.commit()
+
+
+def test_default_schedule_is_disabled(client, auth_headers, db):
+    _clear_personal_sync_logs(db)
     resp = client.get(STATUS_URL, headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()["data"]
@@ -34,6 +41,7 @@ def test_default_schedule_is_disabled(client, auth_headers):
 
 
 def test_put_schedule_persists_and_status_reflects(client, auth_headers, db):
+    _clear_personal_sync_logs(db)
     payload = {
         "enabled": True,
         "interval_minutes": 720,

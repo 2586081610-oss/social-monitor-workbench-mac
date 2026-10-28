@@ -14,6 +14,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -193,21 +194,64 @@ def _cookie_file_set() -> bool:
         return False
 
 
+def is_personal_worker_online() -> bool:
+    """个人任务进程（python -m monitor.personal_worker）心跳是否新鲜。
+
+    与监控层心跳分开：该进程只运行已授权的个人定时/下载任务，不代表
+    RSSHub/博主轮询等其他监控在运行。
+    """
+    path = settings.workbuddy_dir / "personal_worker_heartbeat.json"
+    try:
+        import json
+
+        age = time.time() - json.loads(path.read_text(encoding="utf-8"))["ts"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return 0 <= age <= settings.monitor_heartbeat_timeout
+
+
+def count_download_locks(db: Session) -> int:
+    """个人来源下载积压数：NEW/QUEUED 且被个人来源事实覆盖的作品数（按作品去重）。"""
+    from app.models import PersonalSourceFolderItem, PersonalSourceMark, Work
+    from sqlalchemy import exists, func, or_, select
+
+    return int(
+        db.execute(
+            select(func.count())
+            .select_from(Work)
+            .where(Work.status.in_(["NEW", "QUEUED"]))
+            .where(
+                or_(
+                    Work.source_type == "personal_source",
+                    exists().where(PersonalSourceMark.work_id == Work.id),
+                    exists().where(PersonalSourceFolderItem.work_id == Work.id),
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+
 def status(db: Session) -> dict:
     config = read_config(db)
     last = health_repo.latest_poll_logs(db).get(SYNC_POLL_LOG_PLATFORM)
     monitor_online = is_monitor_online()
+    worker_online = is_personal_worker_online()
     return {
         "channel": "f2",
         "schedule": config.to_dict(),
-        # 定时是否真的会执行 = 开关开启 且 监控层在线（start_all.sh 默认不含监控层）
+        # 定时是否真的会执行 = 开关开启 且（监控层在线 或 个人任务进程在线）。
+        # start_all.sh 只启动前后端；个人任务可用 python -m monitor.personal_worker 单独启动。
         "monitor_online": monitor_online,
-        "schedule_active": config.enabled and monitor_online,
+        "personal_worker_online": worker_online,
+        "schedule_active": config.enabled and (monitor_online or worker_online),
         "sec_user_id_set": bool(config.sec_user_id),
         "cookie_file_set": _cookie_file_set(),
         "runtime_available": _runtime_python_exists(),
         # 全局流水线是既有环境开关（MONITOR_RUN_PIPELINE），与个人来源自动下载相互独立
         "pipeline_enabled": settings.monitor_run_pipeline,
+        # 真实队列状态：已授权下载的待处理积压数
+        "pending_download_count": count_download_locks(db),
         "last_sync": (
             {
                 "finished_at": last.finished_at,
@@ -222,22 +266,47 @@ def status(db: Session) -> dict:
 
 
 def trigger_manual_sync() -> dict:
-    """手动同步：拉起一次性 ingest 子进程（--source f2），立即返回 pid。"""
+    """手动同步：拉起一次性 ingest 子进程（--source f2 --download），立即返回 pid。
+
+    --download 由 ingest 在成功导入后消费已授权的下载积压（授权在
+    download_personal_source_works 内部再次校验，未授权时零处理）。
+    子进程输出经脱敏后落 manual_sync.log（不落作品/收藏夹/账号标识）。
+    """
     if not _runtime_python_exists():
         raise validation("F2 隔离运行时未安装（tools/f2-runtime/.venv）")
     if not _cookie_file_set():
         raise validation("未配置抖音登录态文件（F2_DOUYIN_COOKIE_FILE 或 config/f2/douyin_cookie.txt）")
     workbuddy = settings.workbuddy_dir / "f2"
     workbuddy.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "monitor.personal_source_ingest", "--source", "f2"]
-    with open(workbuddy / "manual_sync.log", "ab") as log_fh:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(settings.workspace_root),
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            creationflags=_CREATE_NO_WINDOW,
-        )
+    cmd = [sys.executable, "-m", "monitor.personal_source_ingest", "--source", "f2", "--download"]
+    from monitor.platforms.douyin_personal_source import redact_sensitive_text
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(settings.workspace_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        creationflags=_CREATE_NO_WINDOW,
+    )
+
+    def _pump() -> None:
+        assert proc.stdout is not None
+        lines: list[str] = []
+        for line in proc.stdout:
+            lines.append(line)
+            if len(lines) >= 400:  # 日志上限：只留类别与数量所需
+                break
+        try:
+            (workbuddy / "manual_sync.log").write_text(
+                redact_sensitive_text("".join(lines), max_length=20000), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    import threading
+
+    threading.Thread(target=_pump, daemon=True).start()
     return {"triggered": True, "pid": proc.pid, "triggered_at": now_iso()}
 
 
