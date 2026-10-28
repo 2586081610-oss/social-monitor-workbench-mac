@@ -30,6 +30,7 @@ from monitor.platforms.douyin_personal_source import (
     PersonalSourceError,
     _clean_str,
     _valid_timestamp,
+    redact_sensitive_text,
 )
 
 # 相对工作区根的默认路径；F2_RUNTIME_DIR / F2_DOUYIN_COOKIE_FILE 可覆盖
@@ -110,10 +111,16 @@ def _item_from_work(work: dict, mark: str) -> PersonalItem:
     )
 
 
-def parse_f2_result(result: dict, *, source_path: str | None = None) -> PersonalSnapshot:
+def parse_f2_result(
+    result: dict,
+    *,
+    source_path: str | None = None,
+    scopes: tuple[str, ...] = SCOPES_ALL,
+) -> PersonalSnapshot:
     """把 f2_fetch.py 的输出文档归一化为 PersonalSnapshot。
 
-    结果文档 ok=False 时抛 PersonalSourceError；scope 缺失/形状不对按失败处理。
+    结果文档 ok=False 时抛 PersonalSourceError；按**请求的 scope** 校验：
+    未请求的 scope 缺失是正常（部分同步），请求了的 scope 缺失才是 schema_changed。
 
     夹内作品以 source_mark="favorite_folder" 进入 items：仅用于作品登记（使夹内
     新作品可被发现与下载），不写 personal_source_marks——平台收藏夹归属是独立的
@@ -125,18 +132,24 @@ def parse_f2_result(result: dict, *, source_path: str | None = None) -> Personal
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
         raise PersonalSourceError(
             _clean_str(error.get("kind")) or "platform_error",
-            _clean_str(error.get("message")) or "F2 取数失败（未提供原因）",
+            redact_sensitive_text(_clean_str(error.get("message")) or "F2 取数失败（未提供原因）"),
         )
+    unknown_scopes = [s for s in scopes if s not in SCOPES_ALL]
+    if unknown_scopes:
+        raise PersonalSourceError("bad_source", f"未知 scope: {unknown_scopes}")
 
     snapshot = PersonalSnapshot(source="f2", source_path=source_path)
     snapshot.warnings = [w for w in result.get("warnings") or [] if isinstance(w, str)]
-    snapshot.folders_available = True
-    snapshot.folder_mode = "multi"
+    want_collections = "collections" in scopes
+    snapshot.folders_available = want_collections
+    snapshot.folder_mode = "multi" if want_collections else None
 
     known_ids: set[str] = set()
     for scope, mark in (("like", "like"), ("collection", "favorite")):
+        if scope not in scopes:
+            continue
         if scope not in result:
-            raise PersonalSourceError("schema_changed", f"F2 结果缺少 {scope} 列表")
+            raise PersonalSourceError("schema_changed", f"F2 结果缺少已请求的 {scope} 列表")
         block = result[scope]
         if not isinstance(block, dict):
             raise PersonalSourceError("schema_changed", f"F2 结果 {scope} 不是对象")
@@ -152,23 +165,32 @@ def parse_f2_result(result: dict, *, source_path: str | None = None) -> Personal
                 snapshot.skipped_invalid.append({"list": scope, "reason": "missing_identity"})
         snapshot.direct_sync[scope] = bool(block.get("complete"))
 
-    collects = result.get("collects")
-    if not isinstance(collects, dict):
-        raise PersonalSourceError("schema_changed", "F2 结果缺少 collects 列表")
-    folder_rows = collects.get("folders")
-    folder_items = collects.get("folder_items")
-    if not isinstance(folder_rows, list) or not isinstance(folder_items, dict):
-        raise PersonalSourceError("schema_changed", "F2 结果 collects.folders/folder_items 形状不正确")
-    for row in folder_rows:
-        if not isinstance(row, dict) or not _clean_str(row.get("folder_id")):
-            raise PersonalSourceError("schema_changed", "F2 收藏夹记录缺少 folder_id")
-        snapshot.folders[str(row["folder_id"])] = _clean_str(row.get("name")) or ""
-    for folder_id in folder_items:
-        if folder_id not in snapshot.folders:
-            raise PersonalSourceError("schema_changed", f"F2 夹内作品引用了未知收藏夹: {folder_id}")
-    snapshot.direct_sync["collections"] = bool(collects.get("complete"))
+    if want_collections:
+        collects = result.get("collects")
+        if not isinstance(collects, dict):
+            raise PersonalSourceError("schema_changed", "F2 结果缺少已请求的 collects 列表")
+        folder_rows = collects.get("folders")
+        folder_items = collects.get("folder_items")
+        if not isinstance(folder_rows, list) or not isinstance(folder_items, dict):
+            raise PersonalSourceError("schema_changed", "F2 结果 collects.folders/folder_items 形状不正确")
+        for row in folder_rows:
+            if not isinstance(row, dict) or not _clean_str(row.get("folder_id")):
+                raise PersonalSourceError("schema_changed", "F2 收藏夹记录缺少 folder_id")
+            snapshot.folders[str(row["folder_id"])] = _clean_str(row.get("name")) or ""
+        for folder_id in folder_items:
+            if folder_id not in snapshot.folders:
+                raise PersonalSourceError("schema_changed", f"F2 夹内作品引用了未知收藏夹: {folder_id}")
+        snapshot.direct_sync["collections"] = bool(collects.get("complete"))
+        # 夹级完整性明细：夹列表分页未走完 + 各夹作品分页未走完
+        if collects.get("folders_complete") is False:
+            snapshot.folder_incomplete.append("folders")
+        folder_incomplete = collects.get("folder_incomplete")
+        if isinstance(folder_incomplete, list):
+            snapshot.folder_incomplete.extend(
+                f for f in folder_incomplete if isinstance(f, str) and f.startswith("folder:")
+            )
 
-    for block in folder_items.values():
+    for block in (result.get("collects", {}).get("folder_items") or {}).values() if want_collections else ():
         for work in block.get("works") or []:
             item = _item_from_work(work, "favorite_folder")
             if not item.external_id:
@@ -177,7 +199,7 @@ def parse_f2_result(result: dict, *, source_path: str | None = None) -> Personal
                 # 已在点赞/平铺收藏中出现过的作品不再重复登记
                 snapshot.items.append(item)
                 known_ids.add(item.external_id)
-    snapshot.folder_memberships = _merge_folder_memberships(result)
+    snapshot.folder_memberships = _merge_folder_memberships(result) if want_collections else {}
     snapshot.skipped_invalid.extend(
         s for s in (result.get("skipped") or []) if isinstance(s, dict)
     )
@@ -230,21 +252,26 @@ def read_snapshot_f2(
         cmd += ["--folder-ids", ",".join(folder_ids)]
 
     try:
-        with open(log_path, "w", encoding="utf-8") as log_fh:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(workspace_root),
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                timeout=budget_seconds + 120,
-            )
+        proc = subprocess.run(
+            cmd,
+            cwd=str(workspace_root),
+            capture_output=True,
+            text=True,
+            timeout=budget_seconds + 120,
+        )
+        # 上游输出（含 F2 日志）先脱敏再落 fetch.log：凭据/账号标识不得进入日志
+        try:
+            combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+            log_path.write_text(redact_sensitive_text(combined, max_length=20000), encoding="utf-8")
+        except OSError:
+            pass
         if not output_path.is_file():
             raise PersonalSourceError("runtime_missing", f"F2 取数未产出结果文件（日志: {log_path}）")
         try:
             result = json.loads(output_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             raise PersonalSourceError("invalid_json", f"F2 取数结果不是有效 JSON（日志: {log_path}）") from None
-        snapshot = parse_f2_result(result, source_path=str(runtime))
+        snapshot = parse_f2_result(result, source_path=str(runtime), scopes=tuple(scopes))
     except subprocess.TimeoutExpired:
         raise PersonalSourceError("timeout", f"F2 取数超出时间预算 {budget_seconds}s") from None
     finally:

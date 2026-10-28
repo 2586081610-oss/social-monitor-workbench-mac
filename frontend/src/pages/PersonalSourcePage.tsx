@@ -53,6 +53,7 @@ export default function PersonalSourcePage() {
   const [intervalMinutes, setIntervalMinutes] = useState(360);
   const [scopes, setScopes] = useState<PersonalScope[]>(['like', 'collection', 'collections']);
   const [secUserId, setSecUserId] = useState('');
+  const [autoDownload, setAutoDownload] = useState(false);
   const [formLoaded, setFormLoaded] = useState(false);
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -66,6 +67,7 @@ export default function PersonalSourcePage() {
       setIntervalMinutes(schedule.interval_minutes);
       setScopes(schedule.scopes.length ? schedule.scopes : ['like', 'collection', 'collections']);
       setSecUserId(schedule.sec_user_id);
+      setAutoDownload(schedule.auto_download);
       setFormLoaded(true);
     }
   }, [statusQuery.data, formLoaded]);
@@ -87,13 +89,19 @@ export default function PersonalSourcePage() {
         interval_minutes: intervalMinutes,
         scopes,
         sec_user_id: secUserId.trim(),
+        auto_download: autoDownload,
       });
-      setSaveMsg({
-        ok: true,
-        text: saved.enabled
-          ? `已保存：定时发现开启，每 ${saved.interval_minutes} 分钟检查一次新增`
-          : '已保存：定时发现保持关闭（手动同步仍可用）',
-      });
+      const parts: string[] = [];
+      parts.push(
+        saved.enabled
+          ? `定时发现开启，每 ${saved.interval_minutes} 分钟检查一次新增`
+          : '定时发现保持关闭（手动同步仍可用）',
+      );
+      if (saved.enabled && !statusQuery.data?.monitor_online) {
+        parts.push('注意：监控层当前未运行，定时不会执行（用 start_all.sh 或 python monitor/main.py 启动监控层）');
+      }
+      parts.push(saved.auto_download ? '个人来源自动下载已授权（仅处理个人来源作品）' : '个人来源自动下载保持关闭');
+      setSaveMsg({ ok: true, text: `已保存：${parts.join('；')}` });
       statusQuery.refetch();
     } catch (err) {
       const message = err instanceof Error ? err.message : '保存失败';
@@ -125,6 +133,7 @@ export default function PersonalSourcePage() {
   const status = statusQuery.data;
   const lastSync = status?.last_sync ?? null;
   const lastOk = lastSync?.status === 'ok';
+  const lastPartial = lastSync?.status === 'partial';
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-4">
@@ -146,9 +155,19 @@ export default function PersonalSourcePage() {
             missingLabel="sec_user_id 未填（点赞列表不可用）"
           />
           <Readiness
-            ok={!!status?.pipeline_enabled}
-            okLabel="自动下载流水线开启"
-            missingLabel="自动下载流水线关闭"
+            ok={!!status?.monitor_online}
+            okLabel="监控层在线"
+            missingLabel="监控层未运行"
+          />
+          <Readiness
+            ok={!!status?.schedule_active}
+            okLabel="定时执行中"
+            missingLabel={status?.schedule?.enabled ? '定时已开启但监控层未运行，暂不执行' : '定时未开启'}
+          />
+          <Readiness
+            ok={!!status?.schedule?.auto_download}
+            okLabel="个人来源自动下载已授权"
+            missingLabel="个人来源自动下载关闭"
           />
         </div>
         <div className="mt-3 rounded-md border border-line bg-sidebar p-3 text-xs leading-5 text-ink-muted">
@@ -159,8 +178,8 @@ export default function PersonalSourcePage() {
                 <span className="text-ink">{formatDateTime(lastSync.finished_at)}</span>
                 {' '}
                 <ToneBadge
-                  tone={lastOk ? 'success' : 'danger'}
-                  label={lastOk ? '成功' : '失败'}
+                  tone={lastOk ? 'success' : lastPartial ? 'warning' : 'danger'}
+                  label={lastOk ? '成功' : lastPartial ? '部分完成' : '失败'}
                 />
                 {lastSync.new_works > 0 ? <span className="ml-1 text-ink">新增作品 {lastSync.new_works}</span> : null}
                 {lastSync.detail ? <span className="ml-1 text-danger">{lastSync.detail}</span> : null}
@@ -170,9 +189,16 @@ export default function PersonalSourcePage() {
             )}
           </p>
           <p className="mt-1">
-            自动下载仅在设置页流水线开启时进行；个人来源作品下载失败会如实标注原因，
-            不会打开或播放作品网页兜底。
+            自动下载由下方「个人来源自动下载」开关单独授权（默认关闭，只处理个人来源作品，
+            不启动其他来源的全局队列）；全局流水线（环境变量 MONITOR_RUN_PIPELINE={String(!!status?.pipeline_enabled)}）
+            与之相互独立。下载失败会如实标注原因，不会打开或播放作品网页兜底。
           </p>
+          {enabled && !status?.monitor_online ? (
+            <p className="mt-1 text-warning">
+              定时发现已开启但监控层未运行：请用 start_all.sh（含监控层）或单独运行
+              python monitor/main.py 后定时才会执行。
+            </p>
+          ) : null}
         </div>
         <div className="mt-3">
           <button
@@ -189,7 +215,7 @@ export default function PersonalSourcePage() {
 
       <Section
         title="定时发现新增作品"
-        desc="默认关闭。开启后由监控层按设定间隔读取列表并登记新作品；实际下载仍取决于流水线开关。"
+        desc="默认关闭。开启后由监控层按设定间隔读取列表并登记新作品；是否自动下载由下方独立开关授权。"
       >
         <div className="flex items-center justify-between rounded-md border border-line px-3 py-2.5">
           <div>
@@ -199,6 +225,18 @@ export default function PersonalSourcePage() {
             </p>
           </div>
           <Toggle checked={enabled} onChange={setEnabled} label="定时发现开关" />
+        </div>
+
+        <div className="mt-2 flex items-center justify-between rounded-md border border-line px-3 py-2.5">
+          <div>
+            <p className="text-sm text-ink">个人来源自动下载</p>
+            <p className="text-xs text-ink-muted">
+              {autoDownload
+                ? '已授权：新登记的个人来源作品将自动下载归档（默认关闭）'
+                : '默认关闭：只登记发现的新作品，不自动下载'}
+            </p>
+          </div>
+          <Toggle checked={autoDownload} onChange={setAutoDownload} label="个人来源自动下载开关" />
         </div>
 
         <div className="mt-3 space-y-2">

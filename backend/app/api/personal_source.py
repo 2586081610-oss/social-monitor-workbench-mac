@@ -19,6 +19,10 @@ class ScheduleConfig(BaseModel):
     interval_minutes: int = Field(ge=5, le=60 * 24 * 7, description="同步间隔（分钟）")
     scopes: list[str] = Field(description="要读取的列表：like/collection/collections")
     sec_user_id: str | None = Field(default=None, description="本人 sec_user_id（点赞列表需要）")
+    auto_download: bool | None = Field(
+        default=None,
+        description="个人来源自动下载授权（默认 false，独立于全局流水线，只处理个人来源作品）",
+    )
 
 
 @router.get("/status", status_code=200)
@@ -41,6 +45,7 @@ def put_schedule(payload: ScheduleConfig, db: Session = Depends(get_db)):
         interval_minutes=payload.interval_minutes,
         scopes=payload.scopes,
         sec_user_id=payload.sec_user_id,
+        auto_download=payload.auto_download,
     )
     return ok(config.to_dict())
 

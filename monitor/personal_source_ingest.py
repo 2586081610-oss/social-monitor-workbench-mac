@@ -34,6 +34,7 @@ from monitor.platforms.douyin_personal_source import (  # noqa: E402
     PersonalSourceError,
     read_snapshot_api,
     read_snapshot_files,
+    redact_sensitive_text,
     resolve_data_dirs,
     snapshot_utc_now,
 )
@@ -58,6 +59,7 @@ class IngestReport:
     works_publication_filled: list[str] = field(default_factory=list)
     folder_items_created: int = 0
     folder_items_updated: int = 0
+    incomplete_lists: list[str] = field(default_factory=list)
     skipped_invalid: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     direct_sync: dict = field(default_factory=dict)
@@ -99,6 +101,11 @@ def ingest_snapshot(snapshot: PersonalSnapshot, db, *, dry_run: bool = False) ->
         warnings=list(snapshot.warnings),
         direct_sync=dict(snapshot.direct_sync),
         folders_available=snapshot.folders_available,
+        # 完整性显式上报：列表级（direct_sync=False）+ 夹级（folder_incomplete）
+        incomplete_lists=(
+            [scope for scope, complete in snapshot.direct_sync.items() if not complete]
+            + list(snapshot.folder_incomplete)
+        ),
         snapshot_updated_at=snapshot.snapshot_updated_at,
         ingested_at=now_iso(),
         dry_run=dry_run,
@@ -206,14 +213,19 @@ def ingest_snapshot(snapshot: PersonalSnapshot, db, *, dry_run: bool = False) ->
 def _read_f2_config(*, create: bool = True) -> dict:
     """从 app_settings 读取 F2 通道配置（与后端 /personal-source/schedule 同一存储）。
 
-    读取配置需要数据库；create=True 时显式 init_db（幂等）保证空库/新机也能同步。
-    dry-run 传 create=False：库不存在则用默认配置，不产生任何存储。
+    create=True：显式 init_db（幂等）保证空库/新机也能同步。
+    create=False（dry-run）：**真只读**访问——mode=ro 打开、库/表缺失或任何
+    SQLite 错误都回退默认值，绝不建库建表（回归保护：既有库 0 表必须保持 0 表）。
     """
     from app.core.config import settings
     from app.services import personal_source_service
 
-    if not create and not settings.database_path.exists():
-        return {"scopes": (), "sec_user_id": ""}
+    if not create:
+        readonly = personal_source_service.read_config_readonly(settings.database_path)
+        return {
+            "scopes": tuple(readonly["scopes"]),
+            "sec_user_id": readonly["sec_user_id"],
+        }
     from app.core.db import init_db
     from monitor.store.shared_db import SessionLocal
 
@@ -287,7 +299,7 @@ def _record_sync_poll_log(
                 db,
                 SYNC_POLL_LOG_PLATFORM,
                 status,
-                detail=detail,
+                detail=redact_sensitive_text(detail) if detail else None,
                 started_at=started_at,
                 new_works=new_works,
             )
@@ -361,12 +373,21 @@ def run_ingest(
         with SessionLocal() as db:
             report = ingest_snapshot(snapshot, db)
             db.commit()
-        _record_sync_poll_log(
-            "ok",
-            None,
-            started_at=started_at,
-            new_works=report.works_created,
-        )
+        if report.incomplete_lists:
+            # 不完整 ≠ 成功：显式 partial，让页面与日志都能看见（不冒充干净成功）
+            _record_sync_poll_log(
+                "partial",
+                "incomplete: " + ", ".join(report.incomplete_lists),
+                started_at=started_at,
+                new_works=report.works_created,
+            )
+        else:
+            _record_sync_poll_log(
+                "ok",
+                None,
+                started_at=started_at,
+                new_works=report.works_created,
+            )
     return report
 
 

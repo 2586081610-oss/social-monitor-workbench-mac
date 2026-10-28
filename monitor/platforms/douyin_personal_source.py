@@ -32,6 +32,29 @@ _RECORD_TYPE_TO_MARK = {"liked_videos": "like", "favorite_videos": "favorite"}
 _DEFAULT_DATA_DIR = Path.home() / "Library" / "Application Support" / "内容数据工作台" / "collector" / ".local-data"
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
+# 凭据/标识脱敏：登录态参数、签名参数与本人 sec_uid 模式（错误消息/日志统一过这里）
+_SECRET_PARAM_RE = re.compile(
+    r"(?i)\b(ms_token|mstoken|a_bogus|verify_fp|verifyfp|s_v_web_id|webid|ttwid|odin_tt|"
+    r"passport_csrf_token|sessionid|sessionid_ss|sid_tt|sid_guard|uid_tt|uiinput|"
+    r"cookie|authorization|token|signature|sign|auth|key|credential)"
+    r"(\s*[=:]\s*)(\"?)[^&'\"\s,;)}\]]+"
+)
+_SEC_UID_RE = re.compile(r"\bMS4wLjABAA[A-Za-z0-9_-]{8,}")
+
+
+def redact_sensitive_text(text: str, *, max_length: int = 300) -> str:
+    """脱敏错误消息/日志：抹去凭据类参数值与本人 sec_uid，超长截断。
+
+    适用于异常 str()、上游输出、poll_logs detail——凭据、账号标识不得落入日志与 UI。
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    redacted = _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    redacted = _SEC_UID_RE.sub("<sec_uid>", redacted)
+    if len(redacted) > max_length:
+        redacted = redacted[:max_length] + "…<截断>"
+    return redacted
+
 
 class PersonalSourceError(RuntimeError):
     """显式失败（缺文件/坏 JSON/版本不识别/接口不可用）。kind 供报告与日志区分。"""
@@ -66,6 +89,8 @@ class PersonalSnapshot:
     folder_assignments: dict[str, str] = field(default_factory=dict)  # videoKey -> folder_id（DDR 单夹）
     # F2 平台多夹归属：external_id -> [folder_id...]（一作可多夹，与单夹语义并存不混用）
     folder_memberships: dict[str, list[str]] = field(default_factory=dict)
+    # 夹级不完整明细：["folders"]（夹列表分页未走完）或 ["folder:<id>"]（夹内作品未走完）
+    folder_incomplete: list[str] = field(default_factory=list)
     # 夹数据形态：single=DDR 一作一夹（写 marks.folder_id）；multi=F2 平台多夹
     #（写 personal_source_folder_items）；None=无夹数据（旧快照按 single 兼容处理）
     folder_mode: str | None = None

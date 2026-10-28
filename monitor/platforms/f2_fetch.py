@@ -8,10 +8,15 @@
 - 只读。只调用点赞列表、平铺收藏、收藏夹列表、收藏夹作品四个列表接口；
   不下载媒体、不写评论、不读取观看历史或聊天记录。
 - 登录态凭据只经 `--cookie-file` 读入内存，绝不打印、不写日志、不写输出。
-- 失败 ≠ 空列表：登录过期 / 接口报错 / 重试用尽都产生 kind 明确的错误，
-  绝不把失败伪装成"没有内容"。
+- 失败 ≠ 空列表：登录过期 / 接口报错 / 重试用尽 / 响应缺字段 / 上游提前结束
+  都产生 kind 明确的错误或"不完整"标记，绝不把失败伪装成"没有内容"。
+- 基于原始响应严格检查：`aweme_list` 缺失或非列表按平台错误处理；
+  `has_more` 缺失按不完整处理（真实 F2 Filter 会把缺失转成 False，
+  不能依赖 Filter 属性语义）。
 - 平台返回条数可能超过请求数量：如一页返回多于请求的 count，如实计数
   （server_oversize_pages）并全部接受，不丢数据也不当作错误。
+- 所有错误消息与上游输出经过 redact_sensitive_text：凭据、账号标识不得
+  落入日志与结果。
 - 输出只含白名单字段（作品身份、标题、作者、发布时间、封面、媒体类型），
   输出文件由调用方放在临时目录，不落在仓库内。
 """
@@ -20,12 +25,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:  # 作为脚本运行时 sys.path[0] 是本目录；作为模块导入时走包路径
+    from douyin_personal_source import redact_sensitive_text
+except ImportError:  # pragma: no cover - 脚本运行路径
+    from monitor.platforms.douyin_personal_source import redact_sensitive_text
 
 # 平台返回的 per-item status_code 中已知"需要重新登录"的码（其余码原样上报）
 PAYLOAD_STATUS_LOGIN_EXPIRED = 8
@@ -34,6 +44,8 @@ _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+KNOWN_SCOPES = ("like", "collection", "collections")
 
 
 class ScopeError(Exception):
@@ -138,25 +150,40 @@ def extract_work(raw_aweme) -> tuple[dict | None, dict | None]:
     return work, None
 
 
-async def consume_video_pages(handler, make_gen, *, label: str, requested_page_counts: int,
+def _payload_status_kind(payload_status) -> tuple[str, str] | None:
+    """payload status_code ≠ 0 → (kind, message)。0/None → None。"""
+    if payload_status in (0, None):
+        return None
+    kind = "login_expired" if payload_status == PAYLOAD_STATUS_LOGIN_EXPIRED else "platform_error"
+    return kind, f"接口返回 status_code={payload_status}"
+
+
+async def consume_video_pages(make_gen, *, label: str, requested_page_counts: int,
                               max_pages: int, max_items: int, warnings: list) -> tuple[list[dict], dict]:
-    """消费 F2 分页异步生成器：逐页提取作品，处理去重/超量/状态码/页数预算。"""
+    """消费 F2 分页异步生成器：逐页基于原始响应严格校验并提取作品。
+
+    - `aweme_list` 缺失/非列表 → ScopeError(platform_error)：失败不冒充空列表。
+    - `has_more` 键缺失 → 记警告并按不完整结束（真实 F2 Filter 把缺失转 False）。
+    - 上游未产出任何页 / 提前结束 → 显式错误或不完整，绝不当成功。
+    """
     works: list[dict] = []
     seen: set[str] = set()
     skipped: list[dict] = []
     pages = 0
     oversize_pages = 0
     finished_cleanly = False
+    stopped_by_budget = False
+    has_more_missing = False
 
-    async for page in make_gen(handler):
+    async for page in make_gen(None):
         pages += 1
         raw = page._to_raw()
-        payload_status = page.status_code
-        if payload_status not in (0, None):
-            kind = ("login_expired" if payload_status == PAYLOAD_STATUS_LOGIN_EXPIRED else "platform_error")
-            raise ScopeError(kind, f"{label} 接口返回 status_code={payload_status}")
-        aweme_list = raw.get("aweme_list") if isinstance(raw, dict) else None
-        aweme_list = aweme_list if isinstance(aweme_list, list) else []
+        status_error = _payload_status_kind(page.status_code)
+        if status_error is not None:
+            raise ScopeError(status_error[0], f"{label} {status_error[1]}")
+        if not isinstance(raw, dict) or "aweme_list" not in raw or not isinstance(raw.get("aweme_list"), list):
+            raise ScopeError("platform_error", f"{label} 响应缺少 aweme_list 字段")
+        aweme_list = raw["aweme_list"]
         if len(aweme_list) > requested_page_counts:
             oversize_pages += 1
         for entry in aweme_list:
@@ -166,18 +193,26 @@ async def consume_video_pages(handler, make_gen, *, label: str, requested_page_c
             elif work["external_id"] not in seen:
                 seen.add(work["external_id"])
                 works.append(work)
-        if page.has_more is None:
+        if "has_more" not in raw:
             warnings.append(f"{label} 第 {pages} 页未返回 has_more，按不完整处理")
+            has_more_missing = True
             break
-        if not page.has_more:
+        if not raw["has_more"]:
             finished_cleanly = True
             break
         if pages >= max_pages:
             warnings.append(f"{label} 达到页数上限 {max_pages}，列表可能不完整")
+            stopped_by_budget = True
             break
         if len(works) >= max_items:
             warnings.append(f"{label} 达到条数上限 {max_items}，列表可能不完整")
+            stopped_by_budget = True
             break
+    if pages == 0:
+        raise ScopeError("platform_error", f"{label} 未返回任何数据页（上游提前结束）")
+    if not finished_cleanly and not stopped_by_budget and not has_more_missing:
+        # 生成器耗尽但最后一页仍声称有更多：上游提前结束，按不完整处理
+        warnings.append(f"{label} 上游在 has_more=1 时提前结束，按不完整处理")
     meta = {
         "pages": pages,
         "items": len(works),
@@ -190,24 +225,34 @@ async def consume_video_pages(handler, make_gen, *, label: str, requested_page_c
     return works, meta
 
 
-def scope_error_from_exception(exc: Exception, label: str) -> ScopeError:
-    """把 F2 异常翻译成明确 kind。点赞列表未登录/未公开在 F2 中表现为重试用尽。"""
-    from f2.exceptions.api_exceptions import (
-        APIRateLimitError,
-        APIRetryExhaustedError,
-        APIUnauthorizedError,
-    )
+def scope_error_from_exception(exc: Exception, label: str, scope: str) -> ScopeError:
+    """把 F2 异常翻译成明确 kind；消息脱敏（不落凭据/账号标识）。
 
-    if isinstance(exc, APIRetryExhaustedError):
-        return ScopeError(
-            "like_list_unavailable",
-            f"{label} 多次返回空内容：登录可能已过期，或列表未对本人可见（平台不区分两者）",
+    - APIRetryExhaustedError：点赞列表为"未登录或未公开"（平台不区分两者）；
+      其他列表按平台错误处理。
+    - APIUnauthorizedError → login_expired；APIRateLimitError → rate_limited。
+    """
+    try:
+        from f2.exceptions.api_exceptions import (
+            APIRateLimitError,
+            APIRetryExhaustedError,
+            APIUnauthorizedError,
         )
-    if isinstance(exc, APIUnauthorizedError):
+    except ImportError:  # pragma: no cover - 非 F2 运行时（测试桩模块）
+        APIRetryExhaustedError = APIUnauthorizedError = APIRateLimitError = ()
+
+    if APIRetryExhaustedError and isinstance(exc, APIRetryExhaustedError):
+        if scope == "like":
+            return ScopeError(
+                "like_list_unavailable",
+                f"{label} 多次返回空内容：登录可能已过期，或列表未对本人可见（平台不区分两者）",
+            )
+        return ScopeError("platform_error", f"{label} 接口多次重试后仍失败")
+    if APIUnauthorizedError and isinstance(exc, APIUnauthorizedError):
         return ScopeError("login_expired", f"{label} 接口返回未授权（HTTP 401）")
-    if isinstance(exc, APIRateLimitError):
+    if APIRateLimitError and isinstance(exc, APIRateLimitError):
         return ScopeError("rate_limited", f"{label} 触发平台限流（HTTP 429）")
-    return ScopeError("platform_error", f"{label} 接口失败：{type(exc).__name__}: {exc}")
+    return ScopeError("platform_error", f"{label} 接口失败：{type(exc).__name__}: {redact_sensitive_text(str(exc), max_length=160)}")
 
 
 async def run_scopes(args: argparse.Namespace) -> dict:
@@ -215,11 +260,25 @@ async def run_scopes(args: argparse.Namespace) -> dict:
     if not cookie:
         raise ScopeError("login_expired", "cookie 文件为空")
 
+    scopes = [s.strip() for s in args.scopes.split(",") if s.strip()]
+    unknown = [s for s in scopes if s not in KNOWN_SCOPES]
+    if unknown:
+        raise ScopeError("bad_scope", f"未知 scope: {unknown}")
+    if not scopes:
+        raise ScopeError("bad_scope", "scopes 为空")
+    if "like" in scopes and not args.sec_user_id.strip():
+        raise ScopeError(
+            "missing_sec_user_id",
+            "读取点赞列表需要本人 sec_user_id（个人来源配置中填写）",
+        )
+
     # F2 只在隔离运行时可用，延迟导入；失败即运行时缺失，不与平台错误混淆。
     try:
         from f2.apps.douyin.handler import DouyinHandler
     except Exception as exc:  # pragma: no cover - 隔离环境本身损坏
-        raise ScopeError("runtime_missing", f"F2 运行时不可用：{exc}") from None
+        raise ScopeError("runtime_missing", f"F2 运行时不可用：{redact_sensitive_text(str(exc), max_length=160)}") from None
+
+    _silence_f2_output()
 
     import importlib.metadata as md
     f2_version = md.version("f2")
@@ -232,52 +291,74 @@ async def run_scopes(args: argparse.Namespace) -> dict:
         "proxies": {"http://": None, "https://": None},
     }
     handler = DouyinHandler(kwargs)
-    scopes = [s.strip() for s in args.scopes.split(",") if s.strip()]
     warnings: list[str] = []
     result: dict = {"ok": True, "warnings": warnings, "runtime": {"f2_version": f2_version}}
     page_counts = args.page_counts
 
-    async def fetch_one(label: str, make_gen) -> None:
-        works, meta = await consume_video_pages(
-            handler, make_gen, label=label, requested_page_counts=page_counts,
-            max_pages=args.max_pages_per_list, max_items=args.max_items_per_list,
-            warnings=warnings,
-        )
-        result[label] = meta | {"works": works}
+    async def fetch_one(label: str, scope: str, make_gen) -> None:
+        try:
+            works, meta = await consume_video_pages(
+                make_gen, label=label, requested_page_counts=page_counts,
+                max_pages=args.max_pages_per_list, max_items=args.max_items_per_list,
+                warnings=warnings,
+            )
+        except ScopeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 翻译为明确 kind 并脱敏
+            raise scope_error_from_exception(exc, label, scope) from None
+        result[scope] = meta | {"works": works}
 
     for scope in scopes:
         if scope == "like":
-            if not args.sec_user_id:
-                warnings.append("未提供本人 sec_user_id，跳过点赞列表")
-                continue
-            await fetch_one("like", lambda h: h.fetch_user_like_videos(
-                args.sec_user_id, page_counts=page_counts, max_counts=args.max_items_per_list))
+            await fetch_one("like", "like", lambda h: handler.fetch_user_like_videos(
+                args.sec_user_id.strip(), page_counts=page_counts, max_counts=args.max_items_per_list))
         elif scope == "collection":
-            await fetch_one("collection", lambda h: h.fetch_user_collection_videos(
+            await fetch_one("collection", "collection", lambda h: handler.fetch_user_collection_videos(
                 page_counts=page_counts, max_counts=args.max_items_per_list))
         elif scope == "collections":
-            await fetch_collections_scope(handler, args, result, warnings)
-        else:
-            raise ScopeError("bad_scope", f"未知 scope: {scope}")
+            try:
+                await fetch_collections_scope(handler, args, result, warnings)
+            except ScopeError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise scope_error_from_exception(exc, "collections", "collections") from None
         await asyncio.sleep(1)
     return result
 
 
+def _silence_f2_output() -> None:
+    """静默 F2 的 INFO 日志与 rich 输出：sec_user_id/收藏夹 ID 不得进入 fetch.log。"""
+    logging.getLogger("f2").setLevel(logging.CRITICAL)
+    logging.getLogger("f2.log").setLevel(logging.CRITICAL)
+    try:
+        from f2.apps.douyin.handler import rich_console
+
+        rich_console.quiet = True
+    except Exception:  # noqa: BLE001 - 输出抑制失败不影响取数
+        pass
+
+
 async def fetch_collections_scope(handler, args, result: dict, warnings: list) -> None:
-    """收藏夹列表 + 逐夹作品。文件夹读取失败按失败处理（不静默跳过）。"""
+    """收藏夹列表 + 逐夹作品。文件夹读取失败按失败处理（不静默跳过）。
+
+    完整性 = 夹列表分页走完 且 每个夹的作品分页走完；任何一处未走完都如实上报。
+    """
     folders: dict[str, dict] = {}
     pages = 0
+    folders_complete = False
     async for page in handler.fetch_user_collects(
         page_counts=args.page_counts, max_counts=args.max_items_per_list,
     ):
         pages += 1
         raw = page._to_raw()
-        payload_status = page.status_code
-        if payload_status not in (0, None):
-            kind = ("login_expired" if payload_status == PAYLOAD_STATUS_LOGIN_EXPIRED else "platform_error")
-            raise ScopeError(kind, f"收藏夹列表接口返回 status_code={payload_status}")
-        rows = raw.get("collects_list") if isinstance(raw, dict) else None
-        for row in rows or []:
+        status_error = _payload_status_kind(page.status_code)
+        if status_error is not None:
+            raise ScopeError(status_error[0], f"收藏夹列表 {status_error[1]}")
+        if not isinstance(raw, dict) or "collects_list" not in raw or not isinstance(raw.get("collects_list"), list):
+            raise ScopeError("platform_error", "收藏夹列表响应缺少 collects_list 字段")
+        for row in raw["collects_list"]:
+            if not isinstance(row, dict):
+                continue
             folder_id = str(row.get("collects_id") or "").strip()
             if not folder_id:
                 continue
@@ -286,34 +367,52 @@ async def fetch_collections_scope(handler, args, result: dict, warnings: list) -
                 "name": (row.get("collects_name") or "").strip() or None,
                 "item_count": row.get("collects_item_count") if row.get("collects_item_count") is not None else row.get("item_count"),
             }
-        if not page.has_more:
+        if "has_more" not in raw:
+            warnings.append("收藏夹列表未返回 has_more，按不完整处理")
+            break
+        if not raw["has_more"]:
+            folders_complete = True
             break
         if pages >= args.max_pages_per_list:
             warnings.append("收藏夹列表达到页数上限，可能不完整")
             break
+    if pages == 0:
+        raise ScopeError("platform_error", "收藏夹列表未返回任何数据页（上游提前结束）")
+
     wanted = {f.strip() for f in args.folder_ids.split(",") if f.strip()}
     folder_items: dict[str, dict] = {}
+    folder_incomplete: list[str] = []
+    all_items_complete = folders_complete
     first = True
-    for folder_id, info in folders.items():
+    for folder_id in folders:
         if wanted and folder_id not in wanted:
             continue
         if not first:
             await asyncio.sleep(1)
         first = False
-        works, meta = await consume_video_pages(
-            handler,
-            lambda h, fid=folder_id: h.fetch_user_collects_videos(
-                fid, page_counts=args.page_counts, max_counts=args.max_items_per_list),
-            label=f"folder:{folder_id}", requested_page_counts=args.page_counts,
-            max_pages=args.max_pages_per_list, max_items=args.max_items_per_list,
-            warnings=warnings,
-        )
+        try:
+            works, meta = await consume_video_pages(
+                lambda h, fid=folder_id: handler.fetch_user_collects_videos(
+                    fid, page_counts=args.page_counts, max_counts=args.max_items_per_list),
+                label=f"folder:{folder_id}", requested_page_counts=args.page_counts,
+                max_pages=args.max_pages_per_list, max_items=args.max_items_per_list,
+                warnings=warnings,
+            )
+        except ScopeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise scope_error_from_exception(exc, f"folder:{folder_id}", "collections") from None
         folder_items[folder_id] = meta | {"works": works}
+        if not meta["complete"]:
+            folder_incomplete.append(f"folder:{folder_id}")
+            all_items_complete = False
     result["collects"] = {
         "pages": pages,
         "folders": sorted(folders.values(), key=lambda f: f["folder_id"]),
+        "folders_complete": folders_complete,
         "folder_items": folder_items,
-        "complete": True,
+        "folder_incomplete": folder_incomplete,
+        "complete": all_items_complete and bool(pages),
     }
 
 
@@ -331,7 +430,7 @@ def main() -> int:
     try:
         acquire_lock(args.lock_file)
     except ScopeError as exc:
-        write_output(args.output, {"ok": False, "error": {"kind": exc.kind, "message": str(exc)}})
+        write_output(args.output, {"ok": False, "error": {"kind": exc.kind, "message": redact_sensitive_text(str(exc))}})
         return 1
 
     async def bounded() -> dict:
@@ -340,7 +439,7 @@ def main() -> int:
     try:
         result = asyncio.run(bounded())
     except ScopeError as exc:
-        write_output(args.output, {"ok": False, "error": {"kind": exc.kind, "message": str(exc)}})
+        write_output(args.output, {"ok": False, "error": {"kind": exc.kind, "message": redact_sensitive_text(str(exc))}})
         return 1
     except asyncio.TimeoutError:
         write_output(args.output, {
@@ -348,10 +447,13 @@ def main() -> int:
             "error": {"kind": "timeout", "message": f"取数超出时间预算 {args.budget_seconds}s"},
         })
         return 1
-    except Exception as exc:  # noqa: BLE001 - 兜底错误必须落盘为明确 JSON
+    except Exception as exc:  # noqa: BLE001 - 兜底错误必须落盘为明确 JSON 且脱敏
         write_output(args.output, {
             "ok": False,
-            "error": {"kind": "platform_error", "message": f"{type(exc).__name__}: {exc}"},
+            "error": {
+                "kind": "platform_error",
+                "message": redact_sensitive_text(f"{type(exc).__name__}: {exc}"),
+            },
         })
         return 1
     result["elapsed_seconds"] = round(time.monotonic() - started, 1)

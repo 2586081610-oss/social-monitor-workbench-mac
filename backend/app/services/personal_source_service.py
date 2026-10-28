@@ -1,14 +1,17 @@
-"""个人来源服务（F2 通道）：定时配置（默认关）、来源状态、手动同步。
+"""个人来源服务（F2 通道）：定时配置（默认关）、来源状态、手动同步、自动下载授权。
 
 约定：
 - 定时配置存 app_settings（前端可改，监控层每分钟读取生效），默认关闭，
   不会隐式启动；实际启用前由用户在页面明确设置频率与范围。
+- 自动下载是**独立授权**（douyin_personal_auto_download，默认关）：只处理
+  个人来源事实覆盖的作品，绝不开启或扩大全局下载队列。
 - 登录态（cookie 文件路径）只走环境变量/本地文件，不入库、不回显。
 - 手动同步与既有一次性爬取一致：拉起子进程，失败原因写日志与 poll_logs。
 """
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -19,12 +22,14 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.errors import validation
 from app.repositories import app_setting_repo, health_repo
+from app.services.health_service import is_monitor_online
 from app.utils.timeutil import now_iso
 
 SYNC_ENABLED_KEY = "douyin_personal_sync_enabled"
 SYNC_INTERVAL_KEY = "douyin_personal_sync_interval_minutes"
 SYNC_SCOPES_KEY = "douyin_personal_sync_scopes"
 SEC_USER_ID_KEY = "douyin_personal_sec_user_id"
+AUTO_DOWNLOAD_KEY = "douyin_personal_auto_download"
 
 # 与 monitor/platforms/f2_fetch.py 的 scope 集合一致
 SYNC_SCOPES = ("like", "collection", "collections")
@@ -35,6 +40,9 @@ MAX_INTERVAL_MINUTES = 60 * 24 * 7
 SYNC_POLL_LOG_PLATFORM = "douyin-personal"
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# 定时配置的全部键（只读访问用）
+_CONFIG_KEYS = (SYNC_ENABLED_KEY, SYNC_INTERVAL_KEY, SYNC_SCOPES_KEY, SEC_USER_ID_KEY, AUTO_DOWNLOAD_KEY)
+
 
 @dataclass
 class PersonalSourceConfig:
@@ -42,6 +50,7 @@ class PersonalSourceConfig:
     interval_minutes: int
     scopes: list[str]
     sec_user_id: str
+    auto_download: bool
 
     def to_dict(self) -> dict:
         return {
@@ -49,35 +58,75 @@ class PersonalSourceConfig:
             "interval_minutes": self.interval_minutes,
             "scopes": list(self.scopes),
             "sec_user_id": self.sec_user_id,
+            "auto_download": self.auto_download,
         }
 
 
-def _parse_bool(raw: str | None) -> bool:
+def _parse_bool(raw) -> bool:
     return (raw or "").strip().lower() == "true"
 
 
-def _parse_interval(raw: str | None) -> int:
+def _parse_interval(raw) -> int:
     try:
         value = int((raw or "").strip())
-    except ValueError:
+    except (ValueError, TypeError):
         return DEFAULT_INTERVAL_MINUTES
     if value < MIN_INTERVAL_MINUTES or value > MAX_INTERVAL_MINUTES:
         return DEFAULT_INTERVAL_MINUTES
     return value
 
 
-def _parse_scopes(raw: str | None) -> list[str]:
+def _parse_scopes(raw) -> list[str]:
     scopes = [s.strip() for s in (raw or "").split(",") if s.strip() in SYNC_SCOPES]
     return scopes or list(SYNC_SCOPES)
 
 
+def config_from_raw(raw: dict) -> dict:
+    """纯函数：键值行 → 配置字典（非法值回退默认）。只读路径与 ORM 路径共用。"""
+    return {
+        "enabled": _parse_bool(raw.get(SYNC_ENABLED_KEY)),
+        "interval_minutes": _parse_interval(raw.get(SYNC_INTERVAL_KEY)),
+        "scopes": _parse_scopes(raw.get(SYNC_SCOPES_KEY)),
+        "sec_user_id": (raw.get(SEC_USER_ID_KEY) or "").strip(),
+        "auto_download": _parse_bool(raw.get(AUTO_DOWNLOAD_KEY)),
+    }
+
+
 def read_config(db: Session) -> PersonalSourceConfig:
-    return PersonalSourceConfig(
-        enabled=_parse_bool(app_setting_repo.get_value(db, SYNC_ENABLED_KEY, "false")),
-        interval_minutes=_parse_interval(app_setting_repo.get_value(db, SYNC_INTERVAL_KEY)),
-        scopes=_parse_scopes(app_setting_repo.get_value(db, SYNC_SCOPES_KEY)),
-        sec_user_id=(app_setting_repo.get_value(db, SEC_USER_ID_KEY, "") or "").strip(),
-    )
+    raw = {key: app_setting_repo.get_value(db, key) for key in _CONFIG_KEYS}
+    data = config_from_raw(raw)
+    return PersonalSourceConfig(**data)
+
+
+def read_config_readonly(db_path: Path) -> dict:
+    """真只读读取配置：mode=ro 打开；库/表缺失或任何 SQLite 错误 → 默认值。
+
+    用于 dry-run 等绝不触发建库/建表的路径；不产生任何写入。
+    """
+    try:
+        if not Path(db_path).exists():
+            return config_from_raw({})
+        uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            tables = {
+                row[0]
+                for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            if "app_settings" not in tables:
+                return config_from_raw({})
+            rows = {
+                key: value
+                for key, value in con.execute(
+                    f"SELECT key, value FROM app_settings WHERE key IN ({','.join('?' * len(_CONFIG_KEYS))})",
+                    _CONFIG_KEYS,
+                ).fetchall()
+            }
+        finally:
+            con.close()
+        return config_from_raw(rows)
+    except (sqlite3.Error, OSError):
+        return config_from_raw({})
 
 
 def update_schedule(
@@ -87,6 +136,7 @@ def update_schedule(
     interval_minutes: int,
     scopes: list[str],
     sec_user_id: str | None = None,
+    auto_download: bool | None = None,
 ) -> PersonalSourceConfig:
     if not isinstance(enabled, bool):
         raise validation("enabled 必须为布尔值")
@@ -104,6 +154,10 @@ def update_schedule(
     app_setting_repo.set_value(db, SYNC_SCOPES_KEY, ",".join(scopes))
     if sec_user_id is not None:
         app_setting_repo.set_value(db, SEC_USER_ID_KEY, sec_user_id.strip())
+    if auto_download is not None:
+        if not isinstance(auto_download, bool):
+            raise validation("auto_download 必须为布尔值")
+        app_setting_repo.set_value(db, AUTO_DOWNLOAD_KEY, "true" if auto_download else "false")
     db.commit()
     return read_config(db)
 
@@ -142,12 +196,17 @@ def _cookie_file_set() -> bool:
 def status(db: Session) -> dict:
     config = read_config(db)
     last = health_repo.latest_poll_logs(db).get(SYNC_POLL_LOG_PLATFORM)
+    monitor_online = is_monitor_online()
     return {
         "channel": "f2",
         "schedule": config.to_dict(),
+        # 定时是否真的会执行 = 开关开启 且 监控层在线（start_all.sh 默认不含监控层）
+        "monitor_online": monitor_online,
+        "schedule_active": config.enabled and monitor_online,
         "sec_user_id_set": bool(config.sec_user_id),
         "cookie_file_set": _cookie_file_set(),
         "runtime_available": _runtime_python_exists(),
+        # 全局流水线是既有环境开关（MONITOR_RUN_PIPELINE），与个人来源自动下载相互独立
         "pipeline_enabled": settings.monitor_run_pipeline,
         "last_sync": (
             {

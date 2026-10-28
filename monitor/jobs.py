@@ -296,6 +296,53 @@ def poll_xhs_creator(creator_id: int) -> None:
         db.commit()
 
 
+def download_personal_source_works(*, limit: int = 10) -> int:
+    """个人来源自动下载（独立授权开关控制，默认关）。
+
+    只处理**个人来源事实覆盖**的作品：source_type=personal_source，或已被
+    personal_source_marks 关联的跨来源作品（先被博主监控登记、后被 F2 发现）。
+    下载任务来源决定兜底策略：本步骤**一律禁用**浏览器播放兜底，失败如实标记。
+    绝不触碰其他来源的队列。
+    """
+    from app.models import PersonalSourceMark
+    from sqlalchemy import or_
+
+    processed = 0
+    with SessionLocal() as db:
+        works = db.execute(
+            select(Work)
+            .outerjoin(PersonalSourceMark, PersonalSourceMark.work_id == Work.id)
+            .where(Work.status == "NEW")
+            .where(or_(Work.source_type == "personal_source", PersonalSourceMark.id.isnot(None)))
+            .order_by(Work.id)
+            .limit(limit)
+        ).scalars().all()
+        for work in works:
+            try:
+                _process_work(db, work, write_pending=True, allow_browser_fallback=False)
+                db.commit()
+                processed += 1
+            except PipelineOfflineError as exc:
+                failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "download"
+                work.status = "FAILED"
+                work.last_error = str(exc)
+                task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+                db.commit()
+                logger.warning("personal-source work %s download offline: %s", work.id, exc)
+            except Exception as exc:  # noqa: BLE001
+                failed_stage = {
+                    "DOWNLOADING": "download",
+                    "TRANSCRIBING": "transcribe",
+                    "FRAME_EXTRACTING": "frames",
+                }.get(work.status, "pipeline")
+                work.status = "FAILED"
+                work.last_error = str(exc)
+                task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+                db.commit()
+                logger.exception("personal-source work %s pipeline failed", work.id)
+    return processed
+
+
 def check_douyin_personal_sync() -> None:
     """定时发现本人新增作品（F2 通道）：读 app_settings 配置，默认关闭。
 
@@ -303,6 +350,8 @@ def check_douyin_personal_sync() -> None:
     本任务每分钟检查一次，到期才执行，因此不重启监控层也能生效；不会隐式启动。
     到期判断基于最近一次同步（含失败）的开始时间，手动同步也计入，避免重叠；
     并发兜底依赖 F2 取数脚本的文件锁。失败如实写 poll_logs，不让调度线程死亡。
+    自动下载是独立授权（douyin_personal_auto_download，默认关）：开启后仅对
+    个人来源事实覆盖的作品执行下载，不影响其他来源队列。
     """
     from app.services import personal_source_service
     from app.utils.timeutil import parse_iso
@@ -325,9 +374,13 @@ def check_douyin_personal_sync() -> None:
         logger.info("个人来源定时同步到期，开始执行（scopes=%s）", config.scopes)
         report = personal_source_ingest.run_ingest("f2")
         logger.info(
-            "个人来源同步完成: 新作品 %s，marks 新增 %s，归属新增 %s",
+            "个人来源同步完成: 新作品 %s，marks 新增 %s，归属新增 %s，完整性=%s",
             report.works_created, report.marks_created, report.folder_items_created,
+            ",".join(report.incomplete_lists) or "complete",
         )
+        if config.auto_download:
+            processed = download_personal_source_works()
+            logger.info("个人来源自动下载处理 %s 个作品", processed)
     except Exception as exc:  # noqa: BLE001 - 同步失败只记录，不中断调度
         logger.warning("个人来源定时同步失败: %s", exc)
 
@@ -469,12 +522,23 @@ class _DownloadCheckpoint:
     manifest_path: Path | None = None
 
 
-def download_and_checkpoint(db: Session, work: Work) -> _DownloadCheckpoint:
+def download_and_checkpoint(
+    db: Session,
+    work: Work,
+    *,
+    allow_browser_fallback: bool | None = None,
+) -> _DownloadCheckpoint:
     """Download/reuse, persist Work + ArchiveEntry + sync job, then sync sidecars.
 
     The checkpoint commit occurs before the independent sync call. Callers may
     safely begin transcription only after this function returns.
+
+    ``allow_browser_fallback=None`` 按作品 source_type 推断（个人来源禁用）；
+    显式传入时以调用方的**下载任务来源**为准（如个人来源同步步骤对跨来源
+    去重的旧作品也必须禁用浏览器兜底）。
     """
+    if allow_browser_fallback is None:
+        allow_browser_fallback = work.source_type != "personal_source"
     resolution, existing_entry = _resolve_work_metadata(db, work)
     publication = resolution.publication_provenance() or publication_provenance_from_work(work)
     source_context = resolution.as_metadata()
@@ -525,8 +589,6 @@ def download_and_checkpoint(db: Session, work: Work) -> _DownloadCheckpoint:
 
         manifest_path = None
         content_type = str(work.content_type or "video").lower()
-        # 个人来源作品（F2/DDR 同步）自动下载不得走浏览器播放兜底：失败如实报错
-        allow_browser_fallback = work.source_type != "personal_source"
         if content_type == "video":
             result = download.download_with_result(
                 work.platform,
@@ -536,6 +598,13 @@ def download_and_checkpoint(db: Session, work: Work) -> _DownloadCheckpoint:
                 allow_browser_fallback=allow_browser_fallback,
             )
             download_source = f"monitor.pipeline.download:{work.platform}"
+        elif work.platform == "douyin":
+            # 抖音图文：尚无经验证的下载通道（Twitter 图片下载器不适用）。
+            # 如实失败，绝不路由到错误下载器，也绝不打开作品网页兜底。
+            raise PipelineOfflineError(
+                "douyin image posts are not supported for automatic download yet "
+                "(no verified downloader); the work stays registered but fails honestly"
+            )
         else:
             from monitor.pipeline import twitter_image
 
@@ -606,12 +675,21 @@ def process_link_analysis(work_id: int) -> dict[str, str | int]:
 
 
 def run_pipeline() -> None:
-    """处理 NEW/QUEUED 作品：下载→转写→抽帧→素材就绪清单；失败落 FAILED 可重试（AC-8）。"""
+    """处理 NEW/QUEUED 作品：下载→转写→抽帧→素材就绪清单；失败落 FAILED 可重试（AC-8）。
+
+    source_type=personal_source 且状态 NEW 的作品**不在这里处理**：个人来源作品
+    的自动下载由独立的授权开关（douyin_personal_auto_download）与专用步骤负责，
+    避免个人来源同步隐式启动/扩大全局下载队列。显式重试（QUEUED）仍走本流水线。
+    """
     if not settings.monitor_run_pipeline:
         return
     with SessionLocal() as db:
         works = db.execute(
-            select(Work).where(Work.status.in_(["NEW", "QUEUED"])).order_by(Work.id).limit(10)
+            select(Work)
+            .where(Work.status.in_(["NEW", "QUEUED"]))
+            .where(~((Work.source_type == "personal_source") & (Work.status == "NEW")))
+            .order_by(Work.id)
+            .limit(10)
         ).scalars().all()
         for work in works:
             try:
@@ -637,13 +715,21 @@ def run_pipeline() -> None:
                 logger.exception("work %s 流水线异常", work.id)
 
 
-def _process_work(db: Session, work, *, write_pending: bool = True) -> None:
+def _process_work(
+    db: Session,
+    work,
+    *,
+    write_pending: bool = True,
+    allow_browser_fallback: bool | None = None,
+) -> None:
     """单作品流水线。v0.4：按 content_type 分流——
     video 走原五步（下载→转写→抽帧→就绪）；image/text（推特图文）走
     下载图片→写 manifest→跳过转写/抽帧→直接进 AI 笔记。
+
+    ``allow_browser_fallback`` 透传给下载检查点；None 按作品 source_type 推断。
     """
     content_type = work.content_type or "video"
-    checkpoint = download_and_checkpoint(db, work)
+    checkpoint = download_and_checkpoint(db, work, allow_browser_fallback=allow_browser_fallback)
     if content_type != "video":
         work.status = "NOTE_GENERATING"
         if write_pending:
