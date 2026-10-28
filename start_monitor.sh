@@ -33,15 +33,30 @@ if [ "$SANDBOX" = "1" ]; then
   echo "[sandbox] 监控层使用隔离数据: $SB"
 fi
 
-case ",${NO_PROXY:-}," in *,localhost,*) : ;; *) NO_PROXY="${NO_PROXY:+$NO_PROXY,}localhost,127.0.0.1,::1"; export NO_PROXY ;; esac
-case ",${no_proxy:-}," in *,localhost,*) : ;; *) no_proxy="${no_proxy:+$no_proxy,}localhost,127.0.0.1,::1"; export no_proxy ;; esac
+. "$ROOT/tools/mac_runtime.sh"
+merge_loopback_proxy
 
-if [ -f "$ROOT/.run/monitor.pid" ] && kill -0 "$(cat "$ROOT/.run/monitor.pid")" 2>/dev/null; then
-  echo "[ERROR] 监控层已在运行 (pid $(cat "$ROOT/.run/monitor.pid"))"; exit 1
-fi
+lock_runtime
+monitor_done=0
+monitor_started=0
+finish_monitor_start() {
+  if [ "$monitor_done" != 1 ] && [ "$monitor_started" = 1 ]; then
+    stop_recorded monitor || true
+    echo "[ERROR] 监控进程启动失败，查看 .run/logs/monitor.log"
+  fi
+  rmdir "$ROOT/.run/control.lock" 2>/dev/null || true
+}
+trap finish_monitor_start EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+refuse_running_record monitor
 
 echo "[提示] 将启动的轮询: RSSHub(bilibili/twitter) 每 ${POLL_RSSHUB_INTERVAL:-300}s、抖音每 ${POLL_DOUYIN_INTERVAL:-600}s、trigger 每 ${POLL_TRIGGER_INTERVAL:-10}s；流水线 MONITOR_RUN_PIPELINE=${MONITOR_RUN_PIPELINE:-false}"
 nohup "$PYTHON" "$ROOT/monitor/main.py" > "$ROOT/.run/logs/monitor.log" 2>&1 &
 echo $! > "$ROOT/.run/monitor.pid"
+monitor_started=1
 sleep 1
-echo "监控层已启动 (pid $(cat "$ROOT/.run/monitor.pid"))，日志: .run/logs/monitor.log"
+record_identity monitor || exit 1
+verified_alive monitor || exit 1
+monitor_done=1
+echo "监控层进程已启动（平台可用性需另行验收） (pid $(cat "$ROOT/.run/monitor.pid"))，日志: .run/logs/monitor.log"
