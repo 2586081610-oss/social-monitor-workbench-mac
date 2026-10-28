@@ -534,10 +534,12 @@ def register_legacy_media(
     )
     if existing is not None and not existing.files_json and not files:
         metadata["check_status"] = existing.check_status
+    # build_archive_metadata 的 payload 本身含 root_key/relative_directory；
+    # 显式覆盖为调用方取值，避免向 keyword-only 的 upsert_entry 传重复关键字。
+    metadata["root_key"] = root_key
+    metadata["relative_directory"] = relative_directory
     entry = archive_repo.upsert_entry(
         db,
-        root_key=root_key,
-        relative_directory=relative_directory,
         **metadata,
     )
     ensure_archive_sync_job(db, entry)
@@ -661,10 +663,11 @@ def record_download_checkpoint(
         metadata_json["resolver"] = merged_resolution
     fields["metadata_json"] = metadata_json
 
+    # 同上：fields 已含 root_key/relative_directory，覆盖为调用方取值后整包传入。
+    fields["root_key"] = root_key
+    fields["relative_directory"] = directory
     entry = archive_repo.upsert_entry(
         db,
-        root_key=root_key,
-        relative_directory=directory,
         **fields,
     )
     ensure_archive_sync_job(db, entry)
