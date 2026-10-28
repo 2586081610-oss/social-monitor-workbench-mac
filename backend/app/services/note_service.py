@@ -26,6 +26,8 @@ def write_pending_manifest(work) -> dict:
     pending_dir: Path = settings.pending_dir
     pending_dir.mkdir(parents=True, exist_ok=True)
 
+    # Keep the existing path naming convention while preserving unknown publication facts.
+    publish_date = to_date(work.published_at) or "unknown"
     date = to_date(work.published_at) or to_date(work.created_at) or "unknown"
     safe_title = sanitize_filename(work.title)
     safe_creator = sanitize_filename(_creator_name(work))
@@ -42,7 +44,7 @@ def write_pending_manifest(work) -> dict:
         "blogger": _creator_name(work),
         "title": work.title,
         "url": work.url,
-        "publish_date": date,
+        "publish_date": publish_date,
         "transcript_path": transcript_path,
         "frames_dir": frames_dir,
         "lexicon_hits": [],  # 流水线抽帧后回填
