@@ -63,13 +63,18 @@ class PersonalSnapshot:
     items: list[PersonalItem] = field(default_factory=list)
     skipped_invalid: list[dict] = field(default_factory=list)  # 无法解析身份的记录（显式上报，不静默丢）
     folders: dict[str, str] = field(default_factory=dict)  # folder_id -> name（favorite 夹）
-    folder_assignments: dict[str, str] = field(default_factory=dict)  # videoKey -> folder_id
+    folder_assignments: dict[str, str] = field(default_factory=dict)  # videoKey -> folder_id（DDR 单夹）
+    # F2 平台多夹归属：external_id -> [folder_id...]（一作可多夹，与单夹语义并存不混用）
+    folder_memberships: dict[str, list[str]] = field(default_factory=dict)
+    # 夹数据形态：single=DDR 一作一夹（写 marks.folder_id）；multi=F2 平台多夹
+    #（写 personal_source_folder_items）；None=无夹数据（旧快照按 single 兼容处理）
+    folder_mode: str | None = None
     folders_available: bool = False
     warnings: list[str] = field(default_factory=list)
     direct_sync: dict = field(default_factory=dict)  # 各列表完整读取标记
     snapshot_updated_at: str | None = None
     snapshot_id: str = ""
-    source: str = "file"  # file | api
+    source: str = "file"  # file | api | f2
     source_path: str | None = None
 
 
@@ -228,6 +233,7 @@ def read_snapshot_files(records_path: Path, folders_path: Path | None = None) ->
             raise PersonalSourceError("invalid_json", f"folders.json 读取/解析失败: {exc}") from None
         snapshot.folders, snapshot.folder_assignments = folders, assignments
         snapshot.folders_available = True
+        snapshot.folder_mode = "single"
     return snapshot
 
 
@@ -243,6 +249,7 @@ def read_snapshot_api(base_url: str, timeout: float = 10.0) -> PersonalSnapshot:
     folders, assignments = parse_folders_document(folders_doc)
     parsed.folders, parsed.folder_assignments = folders, assignments
     parsed.folders_available = True
+    parsed.folder_mode = "single"
     return parsed
 
 

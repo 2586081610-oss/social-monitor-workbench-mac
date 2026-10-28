@@ -451,6 +451,7 @@ def download_with_result(
     media_dir: Path,
     *,
     registered_files: Iterable[MediaFile | Mapping[str, Any]] = (),
+    allow_browser_fallback: bool = True,
 ) -> DownloadResult:
     """Download video/audio and return only verified new or registered original media.
 
@@ -458,6 +459,8 @@ def download_with_result(
     mappings with ``path``, ``size_bytes``, and optional ``sha256``/``media_type``.
     Relative paths are interpreted from ``media_dir``. Unregistered existing
     files are snapshots only; an unchanged stale file can never become success.
+    ``allow_browser_fallback=False`` disables the Mac browser-playback fallback;
+    automatic personal-source syncs must not open or play work pages.
     """
     media_dir = Path(media_dir)
     try:
@@ -471,7 +474,9 @@ def download_with_result(
         return DownloadResult("reused", reusable, None)
 
     before = _snapshot(media_dir)
-    fallback_available = platform == 'douyin' and sys.platform == 'darwin'
+    fallback_available = (
+        allow_browser_fallback and platform == 'douyin' and sys.platform == 'darwin'
+    )
     primary_failed = False
     try:
         _invoke_downloader(platform, url, media_dir)

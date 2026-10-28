@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import archive, creators, groups, health, lexicon, link_analyses, monitor, tags, unclassified, wechat, works
+from app.api import archive, creators, groups, health, lexicon, link_analyses, monitor, personal_source, tags, unclassified, wechat, works
 from app.core.config import settings
 from app.core.db import init_db
 from app.core.errors import AppError
@@ -96,4 +96,5 @@ app.include_router(unclassified.router)
 app.include_router(lexicon.router)
 app.include_router(health.router)
 app.include_router(monitor.router)
+app.include_router(personal_source.router)
 app.include_router(wechat.router)

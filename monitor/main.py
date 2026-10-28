@@ -7,6 +7,7 @@
     - 定时轮询 RSSHub 平台（B站/小红书/推特）
     - 抖音 CDP 占位轮询（ENABLE_DOUYIN_CDP=true 时启用）
     - 消费 /monitor/poll 写下的 trigger 文件
+    - 个人来源定时同步检查（F2 通道；app_settings 开关默认关闭，启用后按间隔执行）
     - MONITOR_RUN_PIPELINE=true 时执行流水线（下载→转写→抽帧→清单）
 """
 from __future__ import annotations
@@ -66,6 +67,14 @@ def build_scheduler() -> BackgroundScheduler:
         jobs.poll_douyin,
         IntervalTrigger(seconds=settings.poll_douyin_interval),
         id="poll_douyin",
+        max_instances=1,
+        coalesce=True,
+    )
+    # 个人来源定时同步（F2）：任务内部读 app_settings 开关，默认关闭不会隐式启动
+    scheduler.add_job(
+        jobs.check_douyin_personal_sync,
+        IntervalTrigger(seconds=settings.monitor_personal_sync_tick_interval),
+        id="check_douyin_personal_sync",
         max_instances=1,
         coalesce=True,
     )

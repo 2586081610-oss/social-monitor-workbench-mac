@@ -1,0 +1,13 @@
+{
+  "project": "f2",
+  "upstream": "https://github.com/Johnserf-Seed/f2",
+  "branch": "dev",
+  "commit": "f6be8c0ffba9a127075bbeafe4838716650b6325",
+  "installed_as": "f2 @ git+https://github.com/Johnserf-Seed/f2@f6be8c0ffba9a127075bbeafe4838716650b6325",
+  "reported_version": "0.0.1.7",
+  "version_note": "该源码 setup 版本号仍显示 0.0.1.7，实际身份以 commit 为准",
+  "verified_on": "2026-10-28",
+  "verification_note": "本人账号小样本验证：点赞/平铺收藏/收藏夹/夹内作品列表接口 HTTP 200；完整分页、定时、下载、历史记录、长期稳定性未验证",
+  "installed_on": "2026-10-29",
+  "python": "3.13"
+}

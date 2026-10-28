@@ -1,12 +1,15 @@
-"""本人点赞/收藏导入编排（C3）：快照 → marks 表 + 守卫式 works 登记。
+"""本人来源导入编排（C3 + F2 通道）：快照 → marks/归属表 + 守卫式 works 登记。
 
 设计：`preflight/favorites-ingest-design.md`。要点：
 - (platform, external_id, source_mark) 幂等；同作品多来源多夹并存。
+- F2 通道（--source f2）额外支持平台多夹：归属事实写 personal_source_folder_items
+  （一作多夹），快照缺项不删除；夹内-only 作品只登记不断言收藏状态。
 - 已存在作品零触碰，只允许"补未知"：published 四件套全为 NULL 且本次快照
   带完整可证发布时间时才补填，其余字段（标题/URL/封面/合集/状态）一律不动。
-- 快照缺数据不抹既有事实：folders.json 不可用时保留 marks 已有 folder 信息。
+- 快照缺数据不抹既有事实：folders 数据不可用时保留 marks 已有 folder 信息。
 - 默认 DOUYIN_PERSONAL_SOURCE=off——不 env 显式开启就不读任何来源。
-- 用法：`python -m monitor.personal_source_ingest [--source file|api] [--dry-run]`
+- 用法：`python -m monitor.personal_source_ingest [--source file|api|f2] [--dry-run]`
+- 非 dry-run 时同步结果（含失败原因）写入 poll_logs（platform=douyin-personal）。
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ _BACKEND = _ROOT / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+from monitor.platforms.douyin_f2_source import read_snapshot_f2  # noqa: E402
 from monitor.platforms.douyin_personal_source import (  # noqa: E402
     PersonalItem,
     PersonalSnapshot,
@@ -37,6 +41,10 @@ from monitor.platforms.douyin_personal_source import (  # noqa: E402
 SOURCE_ENV = "DOUYIN_PERSONAL_SOURCE"
 API_BASE_ENV = "DDR_API_BASE"
 DEFAULT_API_BASE = "http://127.0.0.1:4765"
+# F2 通道设置（存储在 app_settings 表，前端定时配置页维护；env 不可用时为默认值）
+SUPPORTED_SOURCES = ("file", "api", "f2")
+FOLDER_MARK_SNAPSHOT_ONLY = "favorite_folder"  # 仅登记作品，不写 marks 行
+SYNC_POLL_LOG_PLATFORM = "douyin-personal"  # 与 app.services.personal_source_service 一致
 
 
 @dataclass
@@ -48,6 +56,8 @@ class IngestReport:
     marks_updated: int = 0
     works_created: int = 0
     works_publication_filled: list[str] = field(default_factory=list)
+    folder_items_created: int = 0
+    folder_items_updated: int = 0
     skipped_invalid: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     direct_sync: dict = field(default_factory=dict)
@@ -77,7 +87,7 @@ def _guarded_publication_fill(work, item: PersonalItem) -> bool:
 
 def ingest_snapshot(snapshot: PersonalSnapshot, db, *, dry_run: bool = False) -> IngestReport:
     """把一个快照写入当前会话（不 commit，由调用方决定事务边界）。"""
-    from app.models import PersonalSourceMark
+    from app.models import PersonalSourceMark, PersonalSourceFolderItem
     from app.repositories import work_repo
     from app.utils.timeutil import now_iso
 
@@ -95,41 +105,43 @@ def ingest_snapshot(snapshot: PersonalSnapshot, db, *, dry_run: bool = False) ->
     )
 
     for item in snapshot.items:
-        mark = db.query(PersonalSourceMark).filter_by(
-            platform="douyin", external_id=item.external_id, source_mark=item.source_mark,
-        ).one_or_none()
-        if mark is None:
-            mark = PersonalSourceMark(
-                platform="douyin",
-                external_id=item.external_id,
-                source_mark=item.source_mark,
-                source_channel=snapshot.source,
-                snapshot_id=snapshot.snapshot_id,
-                occurred_at=item.occurred_at,
-                occurred_at_source=item.occurred_at_source,
-                first_seen_at=report.ingested_at,
-                last_seen_at=report.ingested_at,
-            )
-            db.add(mark)
-            db.flush()
-            report.marks_created += 1
-        else:
-            report.marks_updated += 1
-            if mark.occurred_at is None and item.occurred_at:
-                mark.occurred_at = item.occurred_at
-                mark.occurred_at_source = item.occurred_at_source
-            mark.last_seen_at = report.ingested_at
-            mark.snapshot_id = snapshot.snapshot_id
-            mark.source_channel = snapshot.source
-        # folder 事实只在本次快照确实携带 folders 数据时更新（缺数据不抹既有事实）
-        if snapshot.folders_available:
-            assigned = snapshot.folder_assignments.get(item.external_id)
-            if assigned:
-                mark.folder_id = assigned
-                mark.folder_name = snapshot.folders.get(assigned)
+        # favorite_folder（F2 夹内作品）：只登记作品与归属事实，不断言点赞/收藏状态
+        if item.source_mark != FOLDER_MARK_SNAPSHOT_ONLY:
+            mark = db.query(PersonalSourceMark).filter_by(
+                platform="douyin", external_id=item.external_id, source_mark=item.source_mark,
+            ).one_or_none()
+            if mark is None:
+                mark = PersonalSourceMark(
+                    platform="douyin",
+                    external_id=item.external_id,
+                    source_mark=item.source_mark,
+                    source_channel=snapshot.source,
+                    snapshot_id=snapshot.snapshot_id,
+                    occurred_at=item.occurred_at,
+                    occurred_at_source=item.occurred_at_source,
+                    first_seen_at=report.ingested_at,
+                    last_seen_at=report.ingested_at,
+                )
+                db.add(mark)
+                db.flush()
+                report.marks_created += 1
             else:
-                mark.folder_id = None
-                mark.folder_name = None
+                report.marks_updated += 1
+                if mark.occurred_at is None and item.occurred_at:
+                    mark.occurred_at = item.occurred_at
+                    mark.occurred_at_source = item.occurred_at_source
+                mark.last_seen_at = report.ingested_at
+                mark.snapshot_id = snapshot.snapshot_id
+                mark.source_channel = snapshot.source
+            # DDR 单夹事实只在本次快照确实携带 folders 数据时更新（缺数据不抹既有事实）
+            if snapshot.folder_mode == "single" or (snapshot.folder_mode is None and snapshot.folders_available):
+                assigned = snapshot.folder_assignments.get(item.external_id)
+                if assigned:
+                    mark.folder_id = assigned
+                    mark.folder_name = snapshot.folders.get(assigned)
+                else:
+                    mark.folder_id = None
+                    mark.folder_name = None
 
         work = work_repo.get_by_platform_external(db, "douyin", item.external_id)
         if work is None:
@@ -150,14 +162,77 @@ def ingest_snapshot(snapshot: PersonalSnapshot, db, *, dry_run: bool = False) ->
             report.works_created += 1
         elif _guarded_publication_fill(work, item):
             report.works_publication_filled.append(item.external_id)
-        mark.work_id = work.id
+        if item.source_mark != FOLDER_MARK_SNAPSHOT_ONLY:
+            mark.work_id = work.id
+
+        # F2 平台多夹归属事实：upsert、快照缺项不删除（不推断取消归属）
+        if snapshot.folder_mode == "multi":
+            folder_ids = snapshot.folder_memberships.get(item.external_id) or []
+            if folder_ids:
+                existing = {
+                    row.folder_id: row
+                    for row in db.query(PersonalSourceFolderItem).filter_by(
+                        platform="douyin", external_id=item.external_id,
+                    ).all()
+                }
+                for folder_id in folder_ids:
+                    row = existing.get(folder_id)
+                    if row is None:
+                        db.add(PersonalSourceFolderItem(
+                            platform="douyin",
+                            external_id=item.external_id,
+                            folder_id=folder_id,
+                            folder_name=snapshot.folders.get(folder_id) or None,
+                            source_channel=snapshot.source,
+                            snapshot_id=snapshot.snapshot_id,
+                            work_id=work.id,
+                            first_seen_at=report.ingested_at,
+                            last_seen_at=report.ingested_at,
+                        ))
+                        report.folder_items_created += 1
+                    else:
+                        row.last_seen_at = report.ingested_at
+                        row.snapshot_id = snapshot.snapshot_id
+                        row.source_channel = snapshot.source
+                        row.work_id = work.id
+                        row.folder_name = snapshot.folders.get(folder_id) or row.folder_name
+                        report.folder_items_updated += 1
 
     if not dry_run:
         db.flush()
     return report
 
 
-def _load_snapshot(source: str, account: str | None, base_dir: str | None) -> PersonalSnapshot:
+def _read_f2_config(*, create: bool = True) -> dict:
+    """从 app_settings 读取 F2 通道配置（与后端 /personal-source/schedule 同一存储）。
+
+    读取配置需要数据库；create=True 时显式 init_db（幂等）保证空库/新机也能同步。
+    dry-run 传 create=False：库不存在则用默认配置，不产生任何存储。
+    """
+    from app.core.config import settings
+    from app.services import personal_source_service
+
+    if not create and not settings.database_path.exists():
+        return {"scopes": (), "sec_user_id": ""}
+    from app.core.db import init_db
+    from monitor.store.shared_db import SessionLocal
+
+    init_db()
+    with SessionLocal() as db:
+        config = personal_source_service.read_config(db)
+    return {
+        "scopes": tuple(config.scopes),
+        "sec_user_id": config.sec_user_id,
+    }
+
+
+def _load_snapshot(
+    source: str,
+    account: str | None,
+    base_dir: str | None,
+    *,
+    f2_config: dict | None = None,
+) -> PersonalSnapshot:
     if source == "file":
         dirs = resolve_data_dirs(base_dir)
         if not dirs:
@@ -181,7 +256,44 @@ def _load_snapshot(source: str, account: str | None, base_dir: str | None) -> Pe
         return read_snapshot_files(chosen / "records.json", chosen / "folders.json")
     if source == "api":
         return read_snapshot_api(os.getenv(API_BASE_ENV, DEFAULT_API_BASE))
-    raise PersonalSourceError("bad_source", f"未知来源: {source}（支持 file|api）")
+    if source == "f2":
+        config = f2_config or {}
+        return read_snapshot_f2(
+            scopes=tuple(config.get("scopes") or ()),
+            sec_user_id=str(config.get("sec_user_id") or ""),
+        )
+    raise PersonalSourceError("bad_source", f"未知来源: {source}（支持 {'|'.join(SUPPORTED_SOURCES)}）")
+
+
+def _record_sync_poll_log(
+    status: str,
+    detail: str | None,
+    *,
+    started_at: str,
+    new_works: int = 0,
+) -> None:
+    """同步结果落 poll_logs（platform=douyin-personal），供来源状态页与定时判到期。
+
+    失败也如实记录；记录失败本身不得掩盖原始错误。
+    """
+    try:
+        from app.core.db import init_db
+        from app.repositories import health_repo
+        from monitor.store.shared_db import SessionLocal
+
+        init_db()
+        with SessionLocal() as db:
+            health_repo.create_poll_log(
+                db,
+                SYNC_POLL_LOG_PLATFORM,
+                status,
+                detail=detail,
+                started_at=started_at,
+                new_works=new_works,
+            )
+            db.commit()
+    except Exception:  # noqa: BLE001 - 状态记录失败不掩盖同步本身的错误
+        pass
 
 
 def run_ingest(
@@ -191,15 +303,30 @@ def run_ingest(
     base_dir: str | None = None,
     dry_run: bool = False,
 ) -> IngestReport:
-    """入口：检查 env 开关 → 读快照 → 入库。off（默认）时显式拒绝。"""
+    """入口：检查 env 开关 → 读快照 → 入库。off（默认）时显式拒绝。
+
+    非 dry-run 时同步结果（成功或失败原因）写入 poll_logs；
+    dry-run 只预演，不写任何存储。
+    """
+    started_at = snapshot_utc_now()
     enabled = (source or os.getenv(SOURCE_ENV, "off")).lower()
     if enabled == "off":
         raise PersonalSourceError(
             "disabled",
-            f"{SOURCE_ENV}=off（默认）。显式设置 {SOURCE_ENV}=file|api 或 --source 后才会读取本人数据",
+            f"{SOURCE_ENV}=off（默认）。显式设置 {SOURCE_ENV}={'|'.join(SUPPORTED_SOURCES)} 或 --source 后才会读取本人数据",
         )
-    # Parse failures must not initialize storage either.
-    snapshot = _load_snapshot(enabled, account, base_dir)
+    if enabled not in SUPPORTED_SOURCES:
+        raise PersonalSourceError("bad_source", f"未知来源: {enabled}（支持 {'|'.join(SUPPORTED_SOURCES)}）")
+    f2_config = None
+    if enabled == "f2":
+        f2_config = _read_f2_config(create=not dry_run)
+    try:
+        # Parse failures must not initialize storage either.
+        snapshot = _load_snapshot(enabled, account, base_dir, f2_config=f2_config)
+    except PersonalSourceError as exc:
+        if not dry_run:
+            _record_sync_poll_log("fail", f"{exc.kind}: {exc}", started_at=started_at)
+        raise
     from app.core.db import init_db
     from monitor.store.shared_db import SessionLocal
 
@@ -234,12 +361,18 @@ def run_ingest(
         with SessionLocal() as db:
             report = ingest_snapshot(snapshot, db)
             db.commit()
+        _record_sync_poll_log(
+            "ok",
+            None,
+            started_at=started_at,
+            new_works=report.works_created,
+        )
     return report
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="导入 DouyinDataReview 本人点赞/收藏快照（只读）")
-    parser.add_argument("--source", choices=["file", "api"], default=None,
+    parser = argparse.ArgumentParser(description="导入本人抖音点赞/收藏/收藏夹快照（只读）")
+    parser.add_argument("--source", choices=list(SUPPORTED_SOURCES), default=None,
                         help=f"数据来源（缺省读 {SOURCE_ENV}；两者都无 = off）")
     parser.add_argument("--account", default=None, help="多账号时的账号目录名")
     parser.add_argument("--base-dir", default=None, help="覆盖 DDR 数据目录")

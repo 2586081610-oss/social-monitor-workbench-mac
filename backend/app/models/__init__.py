@@ -7,8 +7,10 @@ from app.models.creator import Creator
 from app.models.archive_entry import ArchiveEntry
 from app.models.archive_job import ArchiveJob
 from app.models.archive_revision import ArchiveRevision
+from app.models.app_setting import AppSetting
 from app.models.group import Group
 from app.models.lexicon import LexiconEntry
+from app.models.personal_source_folder_item import PersonalSourceFolderItem
 from app.models.personal_source_mark import PersonalSourceMark
 from app.models.poll_log import PollLog
 from app.models.tag import Tag
@@ -17,6 +19,7 @@ from app.models.work import Work
 from app.models.work_tag import WorkTag
 
 __all__ = [
+    "AppSetting",
     "ArchiveEntry",
     "ArchiveJob",
     "ArchiveRevision",
@@ -24,6 +27,7 @@ __all__ = [
     "Creator",
     "Group",
     "LexiconEntry",
+    "PersonalSourceFolderItem",
     "PersonalSourceMark",
     "PollLog",
     "Tag",

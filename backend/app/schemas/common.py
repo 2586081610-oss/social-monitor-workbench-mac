@@ -15,7 +15,8 @@ WorkStatus = Literal[
     "FAILED",
     "UNCLASSIFIED",
 ]
-SourceType = Literal["monitor", "like", "favorite", "manual"]
+# personal_source = 本人来源同步（F2/DDR）登记的作品（monitor/jobs 消费同一种状态机）
+SourceType = Literal["monitor", "like", "favorite", "manual", "personal_source"]
 TagKind = Literal["big", "small"]
 LexiconAction = Literal["increase", "decrease"]
 CookieStatus = Literal["OK", "WARN", "NEEDS_RELOGIN", "UNKNOWN"]

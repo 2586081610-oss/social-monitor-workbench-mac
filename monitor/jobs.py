@@ -296,6 +296,42 @@ def poll_xhs_creator(creator_id: int) -> None:
         db.commit()
 
 
+def check_douyin_personal_sync() -> None:
+    """定时发现本人新增作品（F2 通道）：读 app_settings 配置，默认关闭。
+
+    配置由前端 /api/v1/personal-source/schedule 维护（enabled/interval/scopes），
+    本任务每分钟检查一次，到期才执行，因此不重启监控层也能生效；不会隐式启动。
+    到期判断基于最近一次同步（含失败）的开始时间，手动同步也计入，避免重叠；
+    并发兜底依赖 F2 取数脚本的文件锁。失败如实写 poll_logs，不让调度线程死亡。
+    """
+    from app.services import personal_source_service
+    from app.utils.timeutil import parse_iso
+    from monitor import personal_source_ingest
+
+    try:
+        with SessionLocal() as db:
+            config = personal_source_service.read_config(db)
+            if not config.enabled:
+                return
+            last_started = personal_source_service.last_sync_started_at(db)
+        if last_started:
+            last = parse_iso(last_started)
+            if last is None:
+                logger.warning("个人来源同步：无法解析上次时间 %r，按已到期处理", last_started)
+            else:
+                elapsed_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
+                if elapsed_minutes < config.interval_minutes:
+                    return
+        logger.info("个人来源定时同步到期，开始执行（scopes=%s）", config.scopes)
+        report = personal_source_ingest.run_ingest("f2")
+        logger.info(
+            "个人来源同步完成: 新作品 %s，marks 新增 %s，归属新增 %s",
+            report.works_created, report.marks_created, report.folder_items_created,
+        )
+    except Exception as exc:  # noqa: BLE001 - 同步失败只记录，不中断调度
+        logger.warning("个人来源定时同步失败: %s", exc)
+
+
 def consume_triggers() -> None:
     """消费聚合 API /monitor/poll 写下的 trigger 文件，处理完即删除。"""
     trigger_dir: Path = settings.trigger_dir
@@ -489,12 +525,15 @@ def download_and_checkpoint(db: Session, work: Work) -> _DownloadCheckpoint:
 
         manifest_path = None
         content_type = str(work.content_type or "video").lower()
+        # 个人来源作品（F2/DDR 同步）自动下载不得走浏览器播放兜底：失败如实报错
+        allow_browser_fallback = work.source_type != "personal_source"
         if content_type == "video":
             result = download.download_with_result(
                 work.platform,
                 work.url,
                 media_dir,
                 registered_files=registered_files,
+                allow_browser_fallback=allow_browser_fallback,
             )
             download_source = f"monitor.pipeline.download:{work.platform}"
         else:

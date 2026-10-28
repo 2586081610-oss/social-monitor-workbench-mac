@@ -109,6 +109,11 @@ class Settings:
         self.poll_douyin_interval: int = int(os.getenv("POLL_DOUYIN_INTERVAL", "600"))
         self.poll_trigger_interval: int = int(os.getenv("POLL_TRIGGER_INTERVAL", "10"))
         self.heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", "15"))
+        # 个人来源（F2 通道）定时同步：任务本身每 tick 检查 app_settings 开关，
+        # 默认关闭；tick 间隔只是检查频率，不影响"是否启用"。
+        self.monitor_personal_sync_tick_interval: int = int(
+            os.getenv("MONITOR_PERSONAL_SYNC_TICK_INTERVAL", "60")
+        )
         self.monitor_run_pipeline: bool = os.getenv("MONITOR_RUN_PIPELINE", "false").lower() == "true"
         self.douyin_cdp_enabled: bool = os.getenv("ENABLE_DOUYIN_CDP", "false").lower() == "true"
         self.douyin_cdp_profile_dir: str = os.getenv("DOUYIN_CDP_PROFILE_DIR", "")
