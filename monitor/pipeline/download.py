@@ -22,14 +22,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
+
+import httpx
 
 from .download_result import DownloadResult, MediaFile
+from .proxy import resolve_platform_proxy
 
 logger = logging.getLogger("monitor.pipeline.download")
 
 _COOKIE_CONFIG = os.getenv("PLATFORM_COOKIES_FILE", "")
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".flv", ".webm", ".m4v", ".avi", ".ts"}
 _AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus"}
+# 图文作品（当前仅 xhs 单链接下载）把原始图片存到作品目录根部；
+# 抖音/推特图集仍走 images/ 派生目录，不受此扩展影响。
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 _DERIVED_DIRS = {"frames", "images", "transcript", "transcripts", "notes", "transcription"}
 _REPARSE_POINT = 0x0400
 
@@ -77,6 +84,28 @@ def _load_platform_cookies() -> dict[str, Any]:
         logger.warning("platform cookie configuration could not be read")
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_xhs_download_url(url: str) -> str:
+    """保留分享短链首跳的作品地址，避免下载器继续跳到登录页面。"""
+    try:
+        if (urlsplit(url).hostname or "").lower() not in {"xhslink.com", "xhslink.cn"}:
+            return url
+        response = httpx.get(url, follow_redirects=False, timeout=10.0)
+        location = response.headers.get("location") if 300 <= response.status_code < 400 else None
+        if not location:
+            return url
+        target = urljoin(url, location)
+        parsed = urlsplit(target)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname == "www.xiaohongshu.com"
+            and (parsed.path.startswith("/discovery/item/") or parsed.path.startswith("/explore/"))
+        ):
+            return target
+    except (httpx.HTTPError, ValueError):
+        pass
+    return url
 
 
 def _run_cli(platform: str, command: list[str], *, cwd: str | Path | None = None) -> None:
@@ -172,6 +201,8 @@ def _media_type(path: Path) -> str | None:
         return "video"
     if suffix in _AUDIO_EXTENSIONS:
         return "audio"
+    if suffix in _IMAGE_EXTENSIONS:
+        return "image"
     return None
 
 
@@ -182,6 +213,8 @@ def _is_derived_registered_path(path: Path) -> bool:
 def _registered_media_files(
     media_dir: Path,
     registered_files: Iterable[Any],
+    *,
+    include_images: bool = False,
 ) -> tuple[tuple[MediaFile, ...], bool]:
     """Return verified originals and whether every eligible registration was valid."""
     valid: dict[Path, MediaFile] = {}
@@ -200,7 +233,8 @@ def _registered_media_files(
             continue
         if _is_derived_registered_path(path_hint):
             continue
-        if _media_type(path_hint) is None:
+        inferred_hint = _media_type(path_hint)
+        if inferred_hint is None or (inferred_hint == "image" and not include_images):
             continue
         try:
             raw_path, expected_size, declared_type, expected_hash = _coerce_registered(item)
@@ -208,7 +242,7 @@ def _registered_media_files(
             complete = False
             continue
         inferred_type = _media_type(raw_path)
-        if inferred_type is None:
+        if inferred_type is None or (inferred_type == "image" and not include_images):
             continue
         if declared_type not in {None, inferred_type}:
             complete = False
@@ -245,8 +279,15 @@ def _observe(path: Path) -> _FileObservation | None:
     return _FileObservation(info.st_size, info.st_mtime_ns, info.st_ctime_ns, getattr(info, "st_ino", 0))
 
 
-def _original_media_paths(media_dir: Path) -> list[Path]:
+def _allowed_original_extensions(include_images: bool) -> frozenset[str]:
+    return frozenset(
+        _VIDEO_EXTENSIONS | _AUDIO_EXTENSIONS | (_IMAGE_EXTENSIONS if include_images else set())
+    )
+
+
+def _original_media_paths(media_dir: Path, *, include_images: bool = False) -> list[Path]:
     """Find only original audio/video candidates, excluding known derived folders."""
+    allowed = _allowed_original_extensions(include_images)
     found: list[Path] = []
     try:
         candidates = media_dir.rglob("*")
@@ -255,7 +296,7 @@ def _original_media_paths(media_dir: Path) -> list[Path]:
                 relative = path.relative_to(media_dir)
                 if any(part.casefold() in _DERIVED_DIRS for part in relative.parts[:-1]):
                     continue
-                if path.suffix.lower() not in _VIDEO_EXTENSIONS | _AUDIO_EXTENSIONS:
+                if path.suffix.lower() not in allowed:
                     continue
                 if _observe(path) is not None:
                     _safe_file_under(media_dir, path)
@@ -267,17 +308,22 @@ def _original_media_paths(media_dir: Path) -> list[Path]:
     return sorted(set(found), key=lambda value: str(value).casefold())
 
 
-def _snapshot(media_dir: Path) -> dict[Path, _FileObservation]:
+def _snapshot(media_dir: Path, *, include_images: bool = False) -> dict[Path, _FileObservation]:
     return {
         path: observation
-        for path in _original_media_paths(media_dir)
+        for path in _original_media_paths(media_dir, include_images=include_images)
         if (observation := _observe(path)) is not None
     }
 
 
-def _new_media_files(media_dir: Path, before: Mapping[Path, _FileObservation]) -> tuple[MediaFile, ...]:
+def _new_media_files(
+    media_dir: Path,
+    before: Mapping[Path, _FileObservation],
+    *,
+    include_images: bool = False,
+) -> tuple[MediaFile, ...]:
     new_files: list[MediaFile] = []
-    for path in _original_media_paths(media_dir):
+    for path in _original_media_paths(media_dir, include_images=include_images):
         after = _observe(path)
         if after is None:
             continue
@@ -388,18 +434,25 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
             raise PipelineOfflineError("XHS downloader is not configured")
         cookie_section = _load_platform_cookies().get("xhs", {})
         cookie_string = cookie_section.get("cookie", "") if isinstance(cookie_section, dict) else ""
-        if not isinstance(cookie_string, str) or not cookie_string:
-            raise PipelineOfflineError("XHS download requires a configured browser cookie")
+        command = [
+            sys.executable,
+            str(script),
+            "--url", _resolve_xhs_download_url(url),
+            "--work_path", str(media_dir),
+            "--folder_mode", "False",
+            "--video_cover_download", "False",
+            "--download_record", "False",
+        ]
+        # XHS-Downloader 的网页 Cookie 标注"无需登录"：未配置时匿名尝试公开作品，
+        # 失败由"no newly written original media"如实报错，不再强制要求 Cookie。
+        if isinstance(cookie_string, str) and cookie_string:
+            command += ["--cookie", cookie_string]
+        proxy = resolve_platform_proxy("XHS_PROXY")
+        if proxy:
+            command += ["--proxy", proxy, "--proxy_download", "True"]
         _run_cli(
             platform,
-            [
-                sys.executable,
-                str(script),
-                "--url", url,
-                "--work_path", str(media_dir),
-                "--folder_mode", "False",
-                "--cookie", cookie_string,
-            ],
+            command,
             cwd=xhs_dir,
         )
         return
@@ -411,13 +464,17 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
             raise PipelineOfflineError("yt-dlp is not installed") from exc
         cookie_section = _load_platform_cookies().get("twitter", {})
         cookies_file = cookie_section.get("cookies_file", "") if isinstance(cookie_section, dict) else ""
-        proxy = os.getenv("TWITTER_PROXY", "http://127.0.0.1:7892")
-        command = [sys.executable, "-m", "yt_dlp", "-f", "worst", url]
+        # 代理：用户显式 TWITTER_PROXY 优先，其次标准环境变量/macOS 系统设置（只读，
+        # 不硬编码端口）；解析不到则直连。仅推特子进程使用，不改动全局代理。
+        proxy = resolve_platform_proxy("TWITTER_PROXY")
+        command = [sys.executable, "-m", "yt_dlp", "-f", "worst[acodec!=none][vcodec!=none]/worstvideo+worstaudio/worst", url]
         if cookies_file:
             command += ["--cookies", str(cookies_file)]
         else:
             logger.warning("Twitter cookies are not configured")
-        command += ["--proxy", proxy, "-o", str(media_dir / "%(title)s.%(ext)s")]
+        if proxy:
+            command += ["--proxy", proxy]
+        command += ["-o", str(media_dir / "%(title)s.%(ext)s")]
         _run_cli(platform, command)
         return
 
@@ -452,6 +509,7 @@ def download_with_result(
     *,
     registered_files: Iterable[MediaFile | Mapping[str, Any]] = (),
     allow_browser_fallback: bool = True,
+    include_images: bool | None = None,
 ) -> DownloadResult:
     """Download video/audio and return only verified new or registered original media.
 
@@ -461,6 +519,8 @@ def download_with_result(
     files are snapshots only; an unchanged stale file can never become success.
     ``allow_browser_fallback=False`` disables the Mac browser-playback fallback;
     automatic personal-source syncs must not open or play work pages.
+    ``include_images=None`` 按平台推断：xhs 单链接图文/视频统一从作品目录根部
+    接收图片凭据；其余平台维持仅音视频凭据的既有规则。
     """
     media_dir = Path(media_dir)
     try:
@@ -468,12 +528,17 @@ def download_with_result(
     except OSError:
         raise PipelineOfflineError("media work directory is unavailable") from None
 
-    reusable, registrations_complete = _registered_media_files(media_dir, registered_files)
+    if include_images is None:
+        include_images = platform == "xhs"
+
+    reusable, registrations_complete = _registered_media_files(
+        media_dir, registered_files, include_images=include_images
+    )
     if reusable and registrations_complete:
         logger.info("%s media receipt reused %d registered file(s)", platform, len(reusable))
         return DownloadResult("reused", reusable, None)
 
-    before = _snapshot(media_dir)
+    before = _snapshot(media_dir, include_images=include_images)
     fallback_available = (
         allow_browser_fallback and platform == 'douyin' and sys.platform == 'darwin'
     )
@@ -484,13 +549,13 @@ def download_with_result(
         if not fallback_available:
             raise
         primary_failed = True
-    written = () if primary_failed else _new_media_files(media_dir, before)
+    written = () if primary_failed else _new_media_files(media_dir, before, include_images=include_images)
     if not written and fallback_available:
         # Ignore files left by a failed primary downloader; only new validated
         # files produced by the fallback can become its download receipt.
-        before_fallback = _snapshot(media_dir)
+        before_fallback = _snapshot(media_dir, include_images=include_images)
         _download_douyin_browser(url, media_dir)
-        written = _new_media_files(media_dir, before_fallback)
+        written = _new_media_files(media_dir, before_fallback, include_images=include_images)
     if not written:
         raise PipelineOfflineError(f"{platform} downloader produced no newly written original media")
     result = DownloadResult("downloaded", written, _completed_at())

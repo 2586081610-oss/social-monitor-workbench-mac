@@ -441,6 +441,7 @@ _SAFE_ERROR_LITERALS = frozenset({
     # transcribe.py 常量文案
     "转写引擎 funasr 未安装（首次部署需预下载 paraformer-zh 模型，K18）",
     "转写结果为空",
+    "转写输入文件不存在（可能已被清理或下载不完整）",
     # twitter_image.py 常量文案
     "image album changed during validation",
     "image album contains an empty file",
@@ -455,10 +456,11 @@ _SAFE_ERROR_LITERALS = frozenset({
     "this image adapter supports Twitter/X media only",
     # douyin_images.py 常量文案（含 detail 失败 kind 映射）
     "图集作品目录不可用",
+    "图集存在未完成的恢复，已停止本次下载",
     "作品详情未包含可下载的图片地址（可能不是图集作品）",
     "作品详情身份与目标作品不一致，已拒绝下载",
     "图片下载失败：CDN 返回空内容",
-    "图片下载失败：内容不是有效图片（可能是错误页或损坏数据）",
+    "图片下载失败：内容不是完整可解码的图片（可能是错误页、截断或损坏数据）",
     "未配置抖音登录态文件，请先完成登录导出（config/f2/douyin_cookie.txt 或 F2_DOUYIN_COOKIE_FILE）",
     "F2 隔离运行时未安装（tools/f2-runtime，见其 README）",
     "抖音登录态可能已过期，请重新导出登录态文件",
@@ -472,13 +474,20 @@ _SAFE_ERROR_LITERALS = frozenset({
     "作品详情身份与目标作品不一致，已拒绝下载",
     "视频下载失败：CDN 返回空内容",
     "视频下载失败：内容不是有效 MP4（可能是错误页或损坏数据）",
+    "视频下载失败：内容不是有效 MP4（缺少容器元数据）",
+    "视频下载失败：内容不是有效 MP4（没有视频轨）",
+    "视频下载失败：内容不是可播放的视频（AVFoundation 无法读取）",
+    "视频下载失败：媒体验证不可用（缺少 macOS AVFoundation 工具）",
+    "视频下载失败：媒体验证执行失败",
+    "视频下载失败：所有候选直链均不可用",
+    "视频下载失败：文件不可读",
 })
 
 # 受控动态文案：前缀白名单 + 余量全match给定模式（无自由文本、无凭据/路径/ID）
 _SAFE_DYNAMIC_RULES: tuple[tuple[str, str], ...] = (
     ("图片下载失败：CDN 返回 HTTP ", r"\d+"),
     ("视频下载失败：CDN 返回 HTTP ", r"\d+"),
-    ("图片下载失败（第 ", r"\d+ 张）：内容不是有效图片（可能是错误页或损坏数据）"),
+    ("图片下载失败（第 ", r"\d+ 张）：内容不是完整可解码的图片（可能是错误页、截断或损坏数据）"),
     ("图片下载失败（第 ", r"\d+ 张）：\w+Error"),
     ("视频下载失败：", r"\w+Error"),
     ("download checkpoint failed (", r"\w+Error\)"),
@@ -986,18 +995,21 @@ def process_link_analysis(work_id: int) -> dict[str, str | int]:
             db.commit()
         except PipelineOfflineError as exc:
             failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "download"
+            # 与全局流水线同一安全文案：异常原文/堆栈可能含本机路径或敏感值
+            safe_message = _safe_error_text(exc)
             work.status = "FAILED"
-            work.last_error = str(exc)
-            task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+            work.last_error = safe_message
+            task_repo.mark_failed(db, work.id, failed_stage, safe_message)
             db.commit()
-            logger.warning("link analysis %s pipeline offline: %s", work.id, exc)
+            logger.warning("link analysis %s pipeline offline: error_type=%s", work.id, type(exc).__name__)
         except Exception as exc:  # noqa: BLE001
             failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "pipeline"
+            safe_message = _safe_error_text(exc)
             work.status = "FAILED"
-            work.last_error = str(exc)
-            task_repo.mark_failed(db, work.id, failed_stage, str(exc))
+            work.last_error = safe_message
+            task_repo.mark_failed(db, work.id, failed_stage, safe_message)
             db.commit()
-            logger.exception("link analysis %s pipeline failed", work.id)
+            logger.warning("link analysis %s pipeline failed: error_type=%s", work.id, type(exc).__name__)
         return {"work_id": work.id, "status": work.status}
 
 

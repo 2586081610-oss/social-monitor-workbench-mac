@@ -135,7 +135,8 @@ def transcribe(video_path: str, out_dir: Path) -> str:
     work_path, original = ensure_ascii_work_copy(video_path)
     source = original or work_path
     if not Path(work_path).exists():
-        raise PipelineOfflineError(f"输入文件不存在: {source}")
+        # 不带本机路径：该文案会进入 works.last_error / 任务错误 / 日志
+        raise PipelineOfflineError("转写输入文件不存在（可能已被清理或下载不完整）")
 
     engine = _get_engine()
     out_dir.mkdir(parents=True, exist_ok=True)

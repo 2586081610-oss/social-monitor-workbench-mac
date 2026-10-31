@@ -12,7 +12,12 @@ F2 固定安装在工作区 `tools/f2-runtime/.venv`（版本见该目录 UPSTRE
   与 DDR 的单夹语义（marks.folder_id）分开，不互相覆盖。
 - 登录态经环境变量 F2_DOUYIN_COOKIE_FILE 指向的文本文件提供（用户自行登录导出），
   本模块只传递路径，不读取、不打印内容。
-- 本模块不 import app.*，保持可独立测试。
+- 提交协议（防漏数据/防误报完成）：父进程用 f2_sync_lock 覆盖“续传状态读取 →
+  取数子进程 → 数据库提交 → confirm_f2_progress 游标确认”完整生命周期；取数
+  子进程对进度文件只读，确认步把回传状态在业务数据持久提交后原子落盘/清除。
+  任何失败（含占锁失败）都不删除、不推进任何续传状态。
+- 本模块不 import f2、不 import app.*（f2_fetch 仅在子进程内使用 f2），
+  可在主环境独立测试。
 """
 from __future__ import annotations
 
@@ -22,6 +27,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from monitor.platforms.douyin_personal_source import (
@@ -63,6 +70,125 @@ def runtime_python(runtime_dir: Path) -> Path:
         "runtime_missing",
         f"F2 隔离运行时缺失：{runtime_dir}（见 tools/f2-runtime/README.md 安装说明）",
     )
+
+
+def resolve_progress_file(base: str | os.PathLike | None = None) -> Path:
+    """跨运行续传状态文件路径（workbuddy/f2，测试可用 WORKBUDDY_DIR 隔离）。"""
+    if base:
+        return Path(base)
+    workspace_root = Path(__file__).resolve().parents[2]
+    log_dir = Path(os.getenv("WORKBUDDY_DIR") or (workspace_root / "workbuddy")) / "f2"
+    return log_dir / "sync_progress.json"
+
+
+def clear_progress_file() -> None:
+    """手动恢复工具：清除续传状态，下次同步从头读取。
+
+    正常协议（提交确认）无需调用：取数失败、入库失败、占锁失败都**不**清理
+    状态——已确认游标只指向已持久提交的数据，重放是幂等的。仅人工判断需要
+    强制全量重取时使用。
+    """
+    try:
+        resolve_progress_file().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# 父进程同步锁：flock 覆盖“续传状态读取 → 取数子进程 → 数据库提交 → 游标确认”
+# 完整生命周期。子进程不再自行加锁（父进程不再传 --lock-file），否则父子两次
+# flock 会立即互斥。同进程内重入由线程锁放行：flock 对同进程的第二个 fd 也互斥。
+_SYNC_LOCK_THREAD_GUARD = threading.RLock()
+_SYNC_LOCK_HANDLE = None
+
+
+def _sync_lock_path() -> Path:
+    workspace_root = Path(__file__).resolve().parents[2]
+    log_dir = Path(os.getenv("WORKBUDDY_DIR") or (workspace_root / "workbuddy")) / "f2"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "sync.lock"
+
+
+def _acquire_sync_lock(lock_path: Path):
+    """非阻塞获取跨进程同步锁；失败抛 already_running，绝不触碰任何进度状态。"""
+    try:
+        import fcntl
+
+        fh = open(lock_path, "a")  # 不截断：互斥本体是 flock，不是文件内容
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            raise PersonalSourceError("already_running", "已有一次同步在运行（锁被占用）") from None
+        return fh
+    except ImportError:
+        pass
+    # Windows 兜底：O_EXCL 创建型锁（进程崩溃会遗留，由持有方释放路径删除）
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise PersonalSourceError("already_running", "已有一次同步在运行（锁文件存在）") from None
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    return None  # 无句柄可关；释放按路径删除
+
+
+def _release_sync_lock(handle) -> None:
+    if handle is not None:
+        try:
+            handle.close()  # 关闭 fd 即释放 flock
+        except OSError:
+            pass
+        return
+    try:
+        _sync_lock_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+@contextmanager
+def f2_sync_lock():
+    """跨进程互斥：覆盖续传状态读取、取数、数据库提交与进度确认全生命周期。
+
+    - 占锁失败抛 already_running：失败方立即放弃，不读取、不写入、不清除任何
+      进度状态，正在运行的持有者不受影响。
+    - 同一进程内重入（run_ingest 持锁后再进 read_snapshot_f2）直接放行；
+      跨线程由线程锁串行化（本进程内同一时间只有一次 F2 同步）。
+    - 取数后、提交与确认期间锁不释放：其他进程不能在提交窗口内插进来
+      推进/回滚游标。
+    """
+    global _SYNC_LOCK_HANDLE
+    with _SYNC_LOCK_THREAD_GUARD:
+        if _SYNC_LOCK_HANDLE is not None:
+            yield
+            return
+        handle = _acquire_sync_lock(_sync_lock_path())
+        _SYNC_LOCK_HANDLE = handle
+        try:
+            yield
+        finally:
+            _SYNC_LOCK_HANDLE = None
+            _release_sync_lock(handle)
+
+
+def confirm_f2_progress(snapshot, *, progress_file: str | os.PathLike | None = None) -> bool:
+    """提交协议确认步：业务数据已持久提交后，才推进/清除跨运行续传状态。
+
+    run_ingest 在 `db.commit()` 成功后调用：
+    - 快照携带取数回传的 resume 状态（仅哈希身份/游标/完成标记，无 Cookie/明文）；
+    - 全部请求范围确认完整 → 清除状态文件（下一轮从头完整同步）；
+    - 否则原子覆盖为最新已确认游标；
+    - 形状不完整/写入/替换/清理失败 → 返回 False 且保持旧状态：数据库可能已
+      提交，调用方必须如实上报（不冒充干净成功），下一轮从旧确认游标幂等
+      重放（marks/works/folder_items 均按唯一键幂等），不丢数据、不产生重复；
+      文件系统恢复后确认成功即可清除/推进并开始新一轮。
+    失败路径（占锁失败、取数失败、提交失败）不得调用本函数——失败方不删除、
+    不推进任何状态。
+    """
+    from monitor.platforms.f2_fetch import write_confirmed_progress  # f2_fetch 顶层不依赖 f2
+
+    resume = getattr(snapshot, "resume_state", None)
+    path = str(progress_file) if progress_file is not None else str(resolve_progress_file())
+    return write_confirmed_progress(path, resume)
 
 
 def _merge_folder_memberships(result: dict) -> dict[str, list[str]]:
@@ -204,6 +330,10 @@ def parse_f2_result(
     snapshot.skipped_invalid.extend(
         s for s in (result.get("skipped") or []) if isinstance(s, dict)
     )
+    # 提交协议：取数进程不写进度文件，回传的续传状态由父进程在业务数据
+    # 持久提交后经 confirm_f2_progress 确认落盘/清除（形状校验在确认步做）。
+    resume = result.get("resume")
+    snapshot.resume_state = resume if isinstance(resume, dict) else None
     snapshot.snapshot_id = _snapshot_id(snapshot.items, snapshot.folder_memberships)
     return snapshot
 
@@ -297,14 +427,33 @@ def read_snapshot_f2(
     folder_ids: tuple[str, ...] = (),
     budget_seconds: int = 900,
     page_counts: int = 20,
+    progress_file: str | os.PathLike | None = None,
 ) -> PersonalSnapshot:
-    """通道 C：运行 F2 取数脚本并解析。入口由 personal_source_ingest 调用。"""
+    """通道 C：运行 F2 取数脚本并解析。入口由 personal_source_ingest 调用。
+
+    `progress_file=None` 时使用 workbuddy/f2/sync_progress.json 做跨运行续传
+    （只含哈希身份/游标/完成标记）；传空字符串可显式禁用（如 dry-run）。
+    取数在 f2_sync_lock 内执行：并发调用方立即 already_running 且不触碰进度
+    状态；run_ingest 持同一把锁覆盖到数据库提交与游标确认（重入直接放行）。
+    """
     cookie_path = resolve_cookie_file(cookie_file)
     if not cookie_path.is_file():
         raise PersonalSourceError(
             "login_required",
             f"未找到抖音登录态文件（默认 config/f2/douyin_cookie.txt 或设置 {COOKIE_FILE_ENV}），请先由用户完成登录导出",
         )
+    with f2_sync_lock():
+        return _read_snapshot_f2_locked(
+            cookie_path=cookie_path, runtime_dir=runtime_dir, scopes=scopes,
+            sec_user_id=sec_user_id, folder_ids=folder_ids,
+            budget_seconds=budget_seconds, page_counts=page_counts,
+            progress_file=progress_file,
+        )
+
+
+def _read_snapshot_f2_locked(*, cookie_path: Path, runtime_dir, scopes, sec_user_id,
+                             folder_ids, budget_seconds, page_counts,
+                             progress_file) -> PersonalSnapshot:
     runtime = resolve_runtime_dir(runtime_dir)
     python = runtime_python(runtime)
     script = Path(__file__).resolve().parent / "f2_fetch.py"
@@ -314,7 +463,6 @@ def read_snapshot_f2(
     log_dir = Path(os.getenv("WORKBUDDY_DIR") or (workspace_root / "workbuddy")) / "f2"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "fetch.log"
-    lock_path = log_dir / "sync.lock"
 
     output_path = Path(tempfile.mkdtemp(prefix="f2-fetch-")) / "result.json"
     cmd = [
@@ -325,8 +473,16 @@ def read_snapshot_f2(
         "--scopes", ",".join(scopes),
         "--budget-seconds", str(budget_seconds),
         "--page-counts", str(page_counts),
-        "--lock-file", str(lock_path),
+        # 互斥由父进程 f2_sync_lock 持有（覆盖提交与确认），子进程不再自行加锁
     ]
+    if progress_file == "":
+        resume_path = None  # 显式禁用（dry-run 不推进游标）
+    elif progress_file is None:
+        resume_path = resolve_progress_file()
+    else:
+        resume_path = Path(progress_file)
+    if resume_path:
+        cmd += ["--progress-file", str(resume_path)]
     if sec_user_id:
         cmd += ["--sec-user-id", sec_user_id]
     if folder_ids:

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import subprocess
@@ -28,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from monitor import jobs  # noqa: E402
 from monitor.pipeline import download, download_result  # noqa: E402
 from tests.test_douyin_f2_source import _make_fake_runtime  # noqa: E402
+from tests.test_f2_round6_regressions import real_mp4_bytes  # noqa: E402
 
 from app.models import ArchiveEntry, PersonalSourceFolderItem, PersonalSourceMark, Work  # noqa: E402
 from app.repositories import app_setting_repo  # noqa: E402
@@ -499,9 +501,21 @@ def test_run_pipeline_excludes_new_personal_source_works(db, monkeypatch):
 
 
 def _png_bytes(seed: int) -> bytes:
-    import hashlib
+    """合成 2x2 真 PNG（完整 IHDR/IDAT/IEND，可被 sips 解码）；seed 只改像素颜色。"""
+    import struct
+    import zlib
 
-    return b"\x89PNG\r\n\x1a\n" + hashlib.sha256(str(seed).encode()).digest() * 8
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(
+            ">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    rows = b"".join(
+        b"\x00" + b"".join(bytes(((seed + x) % 256, (seed * 3 + y) % 256, 7))
+                           for x in range(2)) for y in range(2))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b""))
 
 
 def test_douyin_image_post_downloads_offline_end_to_end(db, monkeypatch, tmp_path):
@@ -1257,18 +1271,60 @@ def test_known_safe_messages_still_readable():
         "Douyin downloader is not configured"
     dynamic = jobs._safe_error_text(jobs.PipelineOfflineError("图片下载失败：CDN 返回 HTTP 403"))
     assert dynamic == "图片下载失败：CDN 返回 HTTP 403"
+    dynamic2 = jobs._safe_error_text(jobs.PipelineOfflineError(
+        "图片下载失败（第 2 张）：内容不是完整可解码的图片（可能是错误页、截断或损坏数据）"))
+    assert dynamic2.startswith("图片下载失败（第 2 张）：内容不是完整可解码的图片")
 
 
-def test_image_format_validation(tmp_path, monkeypatch):
-    """图片内容校验：PNG/JPEG/WebP/GIF 接受且扩展名正确；HTML/损坏数据拒绝。"""
+_JPEG_2X2 = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAAB"
+    "AAEAAKACAAQAAAABAAAAAqADAAQAAAABAAAAAgAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklN"
+    "BCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAgACAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAAB"
+    "AgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNi"
+    "coIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SV"
+    "lpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8B"
+    "AAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXET"
+    "IjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpz"
+    "dHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm"
+    "5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwM"
+    "DA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB"
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A/JbSra3/ALLs/wB0n+pj/hH90Vf+zW//"
+    "ADyT/vkVW0r/AJBdn/1xj/8AQRV+vmz9wP/Z")
+_WEBP_1X1 = base64.b64decode("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")
+_GIF_2X2 = base64.b64decode("R0lGODdhAgACAKIAAAAAACgAClAKAHgKCv///wAAAAAAAAAAACH5BAQAAAAALAAAAAACAAIAAAMDCBKTADs=")
+
+
+def test_image_format_validation(tmp_path):
+    """图片校验：完整可解码的 PNG/JPEG/WebP/GIF 接受；只有魔数/截断/HTML 拒绝。"""
     from monitor.pipeline import douyin_images as images
 
-    assert images._detect_image(b"\x89PNG\r\n\x1a\n" + b"x" * 32) == (".png", "image/png")
-    assert images._detect_image(b"\xff\xd8\xff" + b"x" * 32) == (".jpg", "image/jpeg")
-    assert images._detect_image(b"RIFF" + b"x" * 4 + b"WEBP" + b"x" * 16) == (".webp", "image/webp")
-    assert images._detect_image(b"GIF89a" + b"x" * 32) == (".gif", "image/gif")
-    assert images._detect_image(b"<html>access denied</html>") is None
-    assert images._detect_image(b"") is None
+    assert images._detect_image_magic(_png_bytes(1)) == ".png"
+    assert images._detect_image_magic(_JPEG_2X2) == ".jpg"
+    assert images._detect_image_magic(_WEBP_1X1) == ".webp"
+    assert images._detect_image_magic(_GIF_2X2) == ".gif"
+    assert images._detect_image_magic(b"<html>access denied</html>") is None
+    assert images._detect_image_magic(b"") is None
+
+    for ext, payload in {"png": _png_bytes(2), "jpg": _JPEG_2X2,
+                         "webp": _WEBP_1X1, "gif": _GIF_2X2}.items():
+        path = tmp_path / f"valid.{ext}"
+        path.write_bytes(payload)
+        assert images._verify_decodable(path) == f".{ext}"
+
+    corrupt = {
+        "magic_only.png": b"\x89PNG\r\n\x1a\n" + b"x" * 32,  # 无 IHDR/像素数据
+        "truncated.png": _png_bytes(3)[: len(_png_bytes(3)) // 2],  # IDAT 截断
+        "truncated.jpg": _JPEG_2X2[: len(_JPEG_2X2) // 2],
+        "magic_only.jpg": b"\xff\xd8\xff" + b"x" * 32,
+        "magic_only.webp": b"RIFF" + b"x" * 4 + b"WEBP" + b"x" * 16,
+        "magic_only.gif": b"GIF89a" + b"x" * 32,
+        "html.png": b"<html>access denied</html>",
+        "empty.png": b"",
+    }
+    for name, payload in corrupt.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        assert images._verify_decodable(path) is None, name
 
 
 def test_video_direct_download_offline(tmp_path, monkeypatch):
@@ -1283,7 +1339,7 @@ def test_video_direct_download_offline(tmp_path, monkeypatch):
     monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
 
     def fake_stream(url, target, **kw):
-        payload = b"\x00\x00\x00\x18ftypmp42" + b"v" * (64 * 1024)
+        payload = real_mp4_bytes(min_bytes=64 * 1024)  # 可被 AVFoundation 读取的合成视频
         target.write_bytes(payload)
         return len(payload)
 

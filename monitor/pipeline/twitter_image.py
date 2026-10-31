@@ -16,9 +16,12 @@ from urllib.parse import urlsplit
 from curl_cffi import requests as cffi_requests
 
 from .download_result import DownloadResult, MediaFile
+from .proxy import resolve_platform_proxy
 
 logger = logging.getLogger("monitor.pipeline.twitter_image")
-DEFAULT_PROXY = os.getenv("TWITTER_PROXY", "http://127.0.0.1:7892")
+# 兼容旧引用：现按 显式环境变量 → 标准代理变量 → macOS 系统设置 只读解析；
+# 无代理返回 None（直连），不再硬编码本机端口。
+DEFAULT_PROXY = resolve_platform_proxy("TWITTER_PROXY")
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 _TWIMG_HOST = "twimg.com"
 
@@ -29,7 +32,8 @@ class TwitterImageError(Exception):
 
 def _session() -> cffi_requests.Session:
     session = cffi_requests.Session(impersonate="chrome120")
-    session.proxies = {"http": DEFAULT_PROXY, "https": DEFAULT_PROXY}
+    if DEFAULT_PROXY:
+        session.proxies = {"http": DEFAULT_PROXY, "https": DEFAULT_PROXY}
     return session
 
 

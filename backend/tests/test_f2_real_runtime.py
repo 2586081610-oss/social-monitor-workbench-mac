@@ -35,4 +35,22 @@ def test_real_f2_filter_and_generator_semantics():
     assert payload["ok"] is True, f"真实运行时检查未通过: {payload['failures']}"
     assert payload["checks"]["missing_aweme_list"] == "platform_error"
     assert payload["checks"]["collects_status_8"] == "login_expired"
-    assert payload["checks"]["like_missing_sec_user_id"] == "missing_sec_user_id"
+    # 单夹响应缺 aweme_list：隔离为单夹失败，不丢弃整次收藏夹范围
+    assert payload["checks"]["folder_missing_aweme_list"] == "isolated"
+    # 断网环境下点赞缺少显式标识：自动识别必须明确失败，不能冒充空点赞
+    assert payload["checks"]["like_auto_identity"] == "self_identity_unavailable"
+    assert payload["checks"]["auto_identity_like_complete"] is True
+    assert payload["checks"]["explicit_identity_skips_profile"] is True
+    assert payload["checks"]["auto_identity_missing_status"] == "self_identity_unavailable"
+    # 3xx 一律拒绝跟随：本人资料与全部列表（GET/POST、含夹内作品）
+    assert payload["checks"]["redirect_self_profile"] == "redirect_refused"
+    assert payload["checks"]["redirect_like"] == "redirect_refused"
+    assert payload["checks"]["redirect_collection"] == "redirect_refused"
+    assert payload["checks"]["redirect_folder_items"] == "redirect_refused"
+    assert payload["checks"]["detail_redirect"] == "redirect_refused"
+    assert payload["checks"]["detail_restores_handler_crawler"] is True
+    # 连续 403：只尝试有限次数后停止，剩余夹标记未完成
+    assert payload["checks"]["consecutive_403_requests"] == 2
+    assert payload["checks"]["consecutive_403_stopped"] is True
+    # 多次短预算通过持久化游标/夹进度最后确实完整
+    assert payload["checks"]["resume_completed_in_three_runs"] is True

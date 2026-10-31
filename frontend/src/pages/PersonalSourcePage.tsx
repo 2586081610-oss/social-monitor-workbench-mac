@@ -151,8 +151,8 @@ export default function PersonalSourcePage() {
           <Readiness ok={!!status?.cookie_file_set} okLabel="登录态文件已配置" missingLabel="登录态文件缺失" />
           <Readiness
             ok={!!status?.sec_user_id_set}
-            okLabel="本人 sec_user_id 已填"
-            missingLabel="sec_user_id 未填（点赞列表不可用）"
+            okLabel="本人 sec_user_id 已填（同步时不再自动识别）"
+            missingLabel="sec_user_id 未填（同步时尝试自动识别）"
           />
           <Readiness
             ok={!!status?.monitor_online || !!status?.personal_worker_online}
@@ -285,7 +285,7 @@ export default function PersonalSourcePage() {
 
         <div className="mt-3">
           <label className="text-xs font-medium text-ink-muted" htmlFor="sec-user-id">
-            本人 sec_user_id（抖音网页版个人主页链接中的 sec_uid；读取点赞列表需要）
+            本人 sec_user_id（可选：抖音网页版个人主页链接中的 sec_uid；留空时同步尝试自动识别，手动填写优先）
           </label>
           <input
             id="sec-user-id"
@@ -294,6 +294,11 @@ export default function PersonalSourcePage() {
             placeholder="例如 MS4wLjABAAAA…"
             className="mt-1 w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-primary"
           />
+          <p className="mt-1 text-xs leading-5 text-ink-muted">
+            留空时，同步会尝试用已配置的登录态自动确认本人标识；这只说明「会尝试」，
+            不代表登录态可用或已经验证。自动识别失败时同步会明确报错，不会把失败当成空点赞。
+            也可继续手动填写本人标识（填写后同步不再自动识别）。
+          </p>
         </div>
 
         <div className="mt-3 flex items-center gap-3">

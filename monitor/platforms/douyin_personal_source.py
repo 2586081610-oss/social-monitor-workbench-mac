@@ -115,6 +115,9 @@ class PersonalSnapshot:
     snapshot_id: str = ""
     source: str = "file"  # file | api | f2
     source_path: str | None = None
+    # F2 提交协议：取数结果回传的续传状态（仅哈希身份/游标/完成标记）。
+    # 业务数据持久提交后才允许据此推进/清除游标；None 表示无可确认状态。
+    resume_state: dict | None = None
 
 
 def _clean_str(value) -> str | None:

@@ -27,7 +27,11 @@ _BACKEND = _ROOT / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from monitor.platforms.douyin_f2_source import read_snapshot_f2  # noqa: E402
+from monitor.platforms.douyin_f2_source import (  # noqa: E402
+    confirm_f2_progress,
+    f2_sync_lock,
+    read_snapshot_f2,
+)
 from monitor.platforms.douyin_personal_source import (  # noqa: E402
     PersonalItem,
     PersonalSnapshot,
@@ -261,6 +265,7 @@ def _load_snapshot(
     base_dir: str | None,
     *,
     f2_config: dict | None = None,
+    dry_run: bool = False,
 ) -> PersonalSnapshot:
     if source == "file":
         dirs = resolve_data_dirs(base_dir)
@@ -290,6 +295,8 @@ def _load_snapshot(
         return read_snapshot_f2(
             scopes=tuple(config.get("scopes") or ()),
             sec_user_id=str(config.get("sec_user_id") or ""),
+            # dry-run 不读写续传状态，避免只预演却推进游标
+            progress_file="" if dry_run else None,
         )
     raise PersonalSourceError("bad_source", f"未知来源: {source}（支持 {'|'.join(SUPPORTED_SOURCES)}）")
 
@@ -336,6 +343,10 @@ def run_ingest(
 
     非 dry-run 时同步结果（成功或失败原因）写入 poll_logs；
     dry-run 只预演，不写任何存储。
+    F2 通道（非 dry-run）在 f2_sync_lock 内完成取数 → 数据库提交 → 续传确认
+    （提交协议）：业务数据持久提交后 confirm_f2_progress 才推进/清除游标；
+    任何失败（含占锁失败、取数失败、提交失败）都不删除、不推进续传状态——
+    已确认游标只指向已提交的数据，重试从游标处幂等重放。
     """
     started_at = snapshot_utc_now()
     enabled = (source or os.getenv(SOURCE_ENV, "off")).lower()
@@ -349,22 +360,63 @@ def run_ingest(
     f2_config = None
     if enabled == "f2":
         f2_config = _read_f2_config(create=not dry_run)
-    try:
-        # Parse failures must not initialize storage either.
-        snapshot = _load_snapshot(enabled, account, base_dir, f2_config=f2_config)
-    except PersonalSourceError as exc:
-        if not dry_run:
-            _record_sync_poll_log("fail", f"{exc.kind}: {exc}", started_at=started_at)
-        raise
-    from app.core.db import init_db
-    from monitor.store.shared_db import SessionLocal
+
+    def _load_snapshot_or_log_fail() -> PersonalSnapshot:
+        try:
+            return _load_snapshot(enabled, account, base_dir, f2_config=f2_config,
+                                  dry_run=dry_run)
+        except PersonalSourceError as exc:
+            # 解析/取数失败如实记录；不清理续传状态（它只指向已提交的数据）
+            if not dry_run:
+                _record_sync_poll_log("fail", f"{exc.kind}: {exc}", started_at=started_at)
+            raise
+
+    def _commit_snapshot(snapshot: PersonalSnapshot) -> IngestReport:
+        # Standalone CLI has no backend lifespan.
+        from app.core.db import init_db
+        from monitor.store.shared_db import SessionLocal
+
+        init_db()
+        with SessionLocal() as db:
+            report = ingest_snapshot(snapshot, db)
+            db.commit()
+        return report
+
+    def _log_outcome(report: IngestReport, *, confirm_failure: str = "") -> None:
+        if confirm_failure:
+            # 确认失败不冒充干净成功：数据已提交、旧确认状态保全，下一轮从
+            # 已确认游标幂等重放；固定文案，不泄露敏感信息。
+            report.warnings.append(confirm_failure)
+        details = []
+        if confirm_failure:
+            details.append(confirm_failure)
+        if report.incomplete_lists:
+            # 不完整 ≠ 成功：显式 partial，让页面与日志都能看见（不冒充干净成功）
+            details.append("incomplete: " + ", ".join(report.incomplete_lists))
+        if details:
+            _record_sync_poll_log(
+                "partial",
+                "; ".join(details),
+                started_at=started_at,
+                new_works=report.works_created,
+            )
+        else:
+            _record_sync_poll_log(
+                "ok",
+                None,
+                started_at=started_at,
+                new_works=report.works_created,
+            )
 
     if dry_run:
+        # Parse failures must not initialize storage either.
+        snapshot = _load_snapshot_or_log_fail()
         import sqlite3
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.pool import StaticPool
         from app.core.config import settings
+        from app.core.db import init_db
 
         # Preview all mutations on a private in-memory copy. Immutable read avoids
         # journal/SHM creation on the source; refuse live WAL rather than omit it.
@@ -384,27 +436,33 @@ def run_ingest(
                 report = ingest_snapshot(snapshot, db, dry_run=True)
         finally:
             preview_engine.dispose()
+    elif enabled == "f2":
+        confirm_failure = ""
+        try:
+            # 互斥覆盖完整生命周期：其他进程取数/提交/确认期间不能插入；
+            # 占锁失败在这里直接 already_running，绝不触碰持有者的进度。
+            with f2_sync_lock():
+                snapshot = _load_snapshot_or_log_fail()
+                report = _commit_snapshot(snapshot)
+                # 提交协议确认步：数据已持久提交，才允许推进/清除续传游标。
+                # 确认失败（写入/替换/清理的 OSError）必须如实上报——数据库
+                # 可能已提交：保留已入库事实与旧确认状态，下一轮从已确认游标
+                # 幂等重放；文件系统恢复后确认成功即可重新开始新一轮。
+                if getattr(snapshot, "resume_state", None) is not None \
+                        and not confirm_f2_progress(snapshot):
+                    confirm_failure = (
+                        "resume_confirm_failed: 进度确认未写入或清理成功，"
+                        "已提交数据保全，下一轮将从已确认游标重放")
+        except PersonalSourceError as exc:
+            if exc.kind == "already_running":
+                # 占锁失败：本次同步放弃，持有者的进度与数据不受影响
+                _record_sync_poll_log("fail", f"{exc.kind}: {exc}", started_at=started_at)
+            raise
+        _log_outcome(report, confirm_failure=confirm_failure)
     else:
-        # Standalone CLI has no backend lifespan.
-        init_db()
-        with SessionLocal() as db:
-            report = ingest_snapshot(snapshot, db)
-            db.commit()
-        if report.incomplete_lists:
-            # 不完整 ≠ 成功：显式 partial，让页面与日志都能看见（不冒充干净成功）
-            _record_sync_poll_log(
-                "partial",
-                "incomplete: " + ", ".join(report.incomplete_lists),
-                started_at=started_at,
-                new_works=report.works_created,
-            )
-        else:
-            _record_sync_poll_log(
-                "ok",
-                None,
-                started_at=started_at,
-                new_works=report.works_created,
-            )
+        snapshot = _load_snapshot_or_log_fail()
+        report = _commit_snapshot(snapshot)
+        _log_outcome(report)
     return report
 
 

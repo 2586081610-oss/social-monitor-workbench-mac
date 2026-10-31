@@ -88,6 +88,147 @@ def test_f2_ingest_registers_marks_folder_facts_and_works(db):
     assert report.folder_items_created == 3
 
 
+def test_f2_ingest_folder_failure_keeps_existing_facts_and_imports_other_scopes(db):
+    """单夹失败：已有点赞/收藏/夹归属保留，新独立范围与其他夹结果照常导入，报告 partial。"""
+    ingest_snapshot(parse_f2_result(_f2_result()), db)
+    db.commit()
+
+    failed = {
+        "ok": True,
+        "warnings": ["收藏夹#2 读取失败（platform_error），保留其他范围与其他夹已完成的结果"],
+        "like": {"complete": True, "works": [_work("7000003")]},
+        "collection": {"complete": True, "works": [_work("7000004")]},
+        "collects": {
+            "complete": False,
+            "folders_complete": True,
+            "folders": [{"folder_id": "f1", "name": "夹A"}, {"folder_id": "f2", "name": "夹B"}],
+            "folder_items": {
+                "f1": {"complete": True, "works": [_work("8000002")]},
+                # 被隔离的夹：明确 failed，且不带 works（不冒充合法空夹）
+                "f2": {"complete": False, "failed": True, "kind": "platform_error"},
+            },
+            "folder_incomplete": ["folder#2"],
+            "folder_failures": [{"folder": "folder#2", "kind": "platform_error"}],
+        },
+    }
+    report = ingest_snapshot(parse_f2_result(failed), db)
+    db.commit()
+
+    assert "collections" in report.incomplete_lists
+    assert "folder#2" in report.incomplete_lists
+    # 新独立范围照常导入
+    new_ids = {"7000003", "7000004"}
+    marks = db.query(PersonalSourceMark).filter(
+        PersonalSourceMark.external_id.in_(new_ids)).all()
+    assert sorted((m.external_id, m.source_mark) for m in marks) == [
+        ("7000003", "like"), ("7000004", "favorite"),
+    ]
+    # 既有夹归属全部保留（f2 失败只标记不完整，不删除/不推断取消）
+    rows = db.query(PersonalSourceFolderItem).filter(
+        PersonalSourceFolderItem.external_id.in_({"7000001", "8000001", "8000002"})).all()
+    assert sorted((r.external_id, r.folder_id) for r in rows) == [
+        ("7000001", "f1"), ("8000001", "f1"), ("8000001", "f2"), ("8000002", "f1"),
+    ]
+    # 既有 works 未被删除
+    existing = {w.external_id for w in db.query(Work).filter(
+        Work.external_id.in_({"7000001", "7000002", "8000001"})).all()}
+    assert existing == {"7000001", "7000002", "8000001"}
+
+    # 重试恢复：下一次完整快照不再报不完整，既有夹归属仍在
+    recovered = ingest_snapshot(parse_f2_result(_f2_result()), db)
+    db.commit()
+    assert recovered.incomplete_lists == []
+    rows = db.query(PersonalSourceFolderItem).filter(
+        PersonalSourceFolderItem.external_id.in_({"7000001", "8000001"})).all()
+    assert sorted((r.external_id, r.folder_id) for r in rows) == [
+        ("7000001", "f1"), ("8000001", "f1"), ("8000001", "f2"),
+    ]
+
+
+def test_f2_ingest_budget_partial_keeps_completed_scopes_and_marks_incomplete(db):
+    """预算到期：已完成点赞/夹照常导入，未完成范围/夹明确不完整，既有数据保留。"""
+    ingest_snapshot(parse_f2_result(_f2_result()), db)
+    db.commit()
+
+    partial = {
+        "ok": True,
+        "partial": True,
+        "budget_exhausted": True,
+        "warnings": ["整体时间预算到期：已保留已完成结果，其余范围/夹标记不完整"],
+        "like": {"complete": True, "works": [_work("7000005")]},
+        "collection": {"complete": False, "budget_exhausted": True, "works": []},
+        "collects": {
+            "pages": 1, "folders_complete": True, "budget_exhausted": True,
+            "folders": [{"folder_id": "f1", "name": "夹A"}, {"folder_id": "f2", "name": "夹B"}],
+            "folder_items": {
+                "f1": {"complete": True, "works": [_work("8000003")]},
+                "f2": {"complete": False, "budget_exhausted": True},
+            },
+            "folder_incomplete": ["folder#2"],
+            "folder_failures": [{"folder": "folder#2", "kind": "budget_exhausted"}],
+            "complete": False,
+        },
+    }
+    report = ingest_snapshot(parse_f2_result(partial), db)
+    db.commit()
+
+    assert report.direct_sync["like"] is True
+    assert report.direct_sync["collection"] is False
+    assert set(report.incomplete_lists) >= {"collection", "collections", "folder#2"}
+    # 已完成的点赞与夹内作品照常入库
+    assert db.query(PersonalSourceMark).filter_by(
+        external_id="7000005", source_mark="like").one_or_none() is not None
+    assert db.query(PersonalSourceFolderItem).filter_by(
+        external_id="8000003", folder_id="f1").one_or_none() is not None
+    # 既有夹归属（含未完成的 f2）不被删除
+    assert db.query(PersonalSourceFolderItem).filter_by(
+        external_id="8000001", folder_id="f2").one_or_none() is not None
+
+    recovered = ingest_snapshot(parse_f2_result(_f2_result()), db)
+    db.commit()
+    assert recovered.incomplete_lists == []
+
+
+def test_f2_ingest_mixed_folder_order_partial_preserves_existing_memberships(db):
+    """错序夹 + 失败 + 超时：三个夹都明确不完整，既有归属保留，重试后恢复。"""
+    ingest_snapshot(parse_f2_result(_f2_result()), db)
+    db.commit()
+
+    partial = {
+        "ok": True, "partial": True, "budget_exhausted": True, "warnings": [],
+        "collects": {
+            "pages": 1, "folders_complete": True, "complete": False,
+            "folders": [{"folder_id": "A", "name": "A"},
+                        {"folder_id": "M", "name": "M"},
+                        {"folder_id": "Z", "name": "Z"}],
+            "folder_items": {
+                "A": {"complete": False, "failed": True, "kind": "platform_error"},
+                "M": {"complete": False, "budget_exhausted": True},
+                "Z": {"complete": False, "budget_exhausted": True},
+            },
+            "folder_incomplete": ["folder#1", "folder#2", "folder#3"],
+            "folder_failures": [
+                {"folder": "folder#1", "kind": "platform_error"},
+                {"folder": "folder#2", "kind": "budget_exhausted"},
+                {"folder": "folder#3", "kind": "budget_exhausted"},
+            ],
+        },
+    }
+    report = ingest_snapshot(parse_f2_result(partial, scopes=("collections",)), db)
+    db.commit()
+    assert set(report.incomplete_lists) >= {
+        "collections", "folder#1", "folder#2", "folder#3"}
+    # 既有 f1/f2 归属不因本轮夹失败/未完成而删除
+    rows = db.query(PersonalSourceFolderItem).filter(
+        PersonalSourceFolderItem.external_id.in_({"7000001", "8000001"})).all()
+    assert sorted((r.external_id, r.folder_id) for r in rows) == [
+        ("7000001", "f1"), ("8000001", "f1"), ("8000001", "f2"),
+    ]
+    recovered = ingest_snapshot(parse_f2_result(_f2_result(), scopes=("collections",)), db)
+    db.commit()
+    assert recovered.incomplete_lists == []
+
+
 def test_f2_ingest_rerun_is_idempotent_and_missing_membership_not_deleted(db):
     """重跑零新增；快照缺项不推断取消归属（归属行保留、仅 last_seen 更新）。"""
     snapshot = parse_f2_result(_f2_result())
