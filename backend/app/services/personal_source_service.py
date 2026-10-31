@@ -455,3 +455,42 @@ def sync_loop_status() -> dict:
         state["final_status"] = state.get("final_status") or "process_exited"
         _write_loop_state(state)
     return {"exists": True, "running": bool(state.get("running")), "state": state, **_loop_live_totals()}
+
+
+def list_personal_works(
+    db: Session,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    content_type: str | None = None,
+    status: str | None = None,
+    q: str | None = None,
+) -> dict:
+    """已抓取的个人来源作品清单（分页 + 过滤），供前端实时浏览。"""
+    from app.models import Work
+
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    query = db.query(Work).filter(Work.platform == "douyin")
+    if content_type:
+        query = query.filter(Work.content_type == content_type)
+    if status:
+        query = query.filter(Work.status == status)
+    if q:
+        query = query.filter(Work.title.contains(q))
+    total = query.count()
+    rows = query.order_by(Work.id.desc()).offset(offset).limit(limit).all()
+    items = [
+        {
+            "external_id": w.external_id,
+            "title": w.title,
+            "content_type": w.content_type,
+            "published_at": w.published_at,
+            "url": w.url,
+            "cover_url": w.cover_url,
+            "status": w.status,
+            "media_path": w.media_path,
+        }
+        for w in rows
+    ]
+    return {"total": total, "limit": limit, "offset": offset, "items": items}

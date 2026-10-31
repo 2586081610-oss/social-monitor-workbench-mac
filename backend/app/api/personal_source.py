@@ -79,3 +79,20 @@ def post_sync_loop_stop():
 def get_sync_loop_status():
     """连续同步循环状态：运行中/轮次/最新一轮结果/作品总数。"""
     return ok(personal_source_service.sync_loop_status())
+
+
+@router.get("/works", status_code=200)
+def get_personal_works(
+    limit: int = 50,
+    offset: int = 0,
+    content_type: str | None = None,
+    status: str | None = None,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """已抓取的个人来源作品清单（作品ID/标题/类型/发布时间/链接/封面/状态/媒体路径）。"""
+    return ok(
+        personal_source_service.list_personal_works(
+            db, limit=limit, offset=offset, content_type=content_type, status=status, q=q
+        )
+    )

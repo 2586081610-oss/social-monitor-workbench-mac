@@ -3,19 +3,21 @@
  * 隐私约定：登录态 cookie 只在本机文件，页面不显示内容；同步失败原因如实展示。
  */
 import { useEffect, useState } from 'react';
+import { ExternalLink, Search } from 'lucide-react';
 import { Heart, Play, RefreshCw, Save, Square } from 'lucide-react';
 import { ErrorState, LoadingState } from '../components/common/StateViews';
 import { ToneBadge } from '../components/common/StatusBadge';
 import Toggle from '../components/common/Toggle';
 import {
   getPersonalSourceStatus,
+  getPersonalSourceWorks,
   getPersonalSyncLoopStatus,
   putPersonalSourceSchedule,
   startPersonalSyncLoop,
   stopPersonalSyncLoop,
   triggerPersonalSourceSync,
 } from '../services/personalSource';
-import type { PersonalScope } from '../services/personalSource';
+import type { PersonalScope, PersonalWorkItem } from '../services/personalSource';
 import { useAsyncData, usePolling } from '../hooks/useApi';
 import { formatDateTime } from '../utils/format';
 
@@ -164,6 +166,35 @@ export default function PersonalSourcePage() {
       setStoppingLoop(false);
     }
   };
+
+  // 已抓取作品实时清单：分页/过滤 + 随循环自动刷新（每 12 秒）
+  const [worksPage, setWorksPage] = useState(0);
+  const [typeFilter, setTypeFilter] = useState<'' | 'video' | 'image'>('');
+  const [statusFilter, setStatusFilter] = useState<'' | 'NEW' | 'DOWNLOADED' | 'DONE' | 'FAILED'>('');
+  const [titleQuery, setTitleQuery] = useState('');
+  const [appliedQuery, setAppliedQuery] = useState('');
+  const [worksTick, setWorksTick] = useState(0);
+  const PAGE_SIZE = 50;
+  const worksQuery = useAsyncData(
+    () =>
+      getPersonalSourceWorks({
+        limit: PAGE_SIZE,
+        offset: worksPage * PAGE_SIZE,
+        content_type: typeFilter || null,
+        status: statusFilter || null,
+        q: appliedQuery || null,
+      }),
+    [worksPage, typeFilter, statusFilter, appliedQuery, worksTick],
+  );
+  usePolling(worksQuery.refetch, true, 12000);
+  // 联动：循环每完成一轮（last_poll 变化），立即刷新清单
+  const lastPollKey = loopQuery.data?.last_poll?.finished_at ?? '';
+  useEffect(() => {
+    if (lastPollKey) setWorksTick((t) => t + 1);
+  }, [lastPollKey]);
+
+  const works = worksQuery.data;
+  const totalPages = works ? Math.max(1, Math.ceil(works.total / PAGE_SIZE)) : 1;
 
   if (statusQuery.loading && !statusQuery.data) return <LoadingState />;
   if (statusQuery.error && !statusQuery.data) {
@@ -330,6 +361,157 @@ export default function PersonalSourcePage() {
             </div>
           );
         })()}
+      </Section>
+
+      <Section
+        title="已抓取作品"
+        desc="连续同步抓到的列表元数据（作品ID/标题/类型/发布时间/链接/封面/状态/媒体路径），随爬取轮次实时更新；媒体路径有值表示文件已下载归档。"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-2 h-4 w-4 text-ink-muted" />
+            <input
+              value={titleQuery}
+              onChange={(e) => setTitleQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  setWorksPage(0);
+                  setAppliedQuery(titleQuery.trim());
+                }
+              }}
+              placeholder="按标题搜索，回车确认"
+              className="w-56 rounded-md border border-line bg-surface py-1.5 pl-8 pr-2 text-sm text-ink outline-none focus:border-primary"
+            />
+          </div>
+          {([['', '全部类型'], ['video', '视频'], ['image', '图文']] as const).map(([v, label]) => (
+            <button
+              key={v || 'all-type'}
+              type="button"
+              onClick={() => { setWorksPage(0); setTypeFilter(v); }}
+              className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                typeFilter === v ? 'border-primary bg-primary text-white' : 'border-line text-ink hover:bg-sidebar'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          {([['', '全部状态'], ['NEW', 'NEW'], ['DOWNLOADED', 'DOWNLOADED'], ['DONE', 'DONE'], ['FAILED', 'FAILED']] as const).map(([v, label]) => (
+            <button
+              key={v || 'all-status'}
+              type="button"
+              onClick={() => { setWorksPage(0); setStatusFilter(v); }}
+              className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                statusFilter === v ? 'border-primary bg-primary text-white' : 'border-line text-ink hover:bg-sidebar'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => { worksQuery.refetch(); loopQuery.refetch(); }}
+            className="rounded-md border border-line px-2.5 py-1 text-xs text-ink hover:bg-sidebar"
+          >
+            <RefreshCw className="mr-1 inline h-3 w-3" />
+            刷新
+          </button>
+          <span className="text-xs text-ink-muted">
+            共 {works?.total ?? '…'} 条 · 第 {worksPage + 1}/{totalPages} 页 · {loopQuery.data?.running ? '爬取运行中，自动更新' : '爬取未运行'}
+          </span>
+        </div>
+
+        {worksQuery.loading && !worksQuery.data ? (
+          <p className="mt-3 text-xs text-ink-muted">加载中…</p>
+        ) : worksQuery.error && !worksQuery.data ? (
+          <p className="mt-3 text-xs text-danger">加载失败：{worksQuery.error.message}</p>
+        ) : (
+          <div className="mt-3 overflow-hidden rounded-md border border-line">
+            <table className="w-full table-fixed text-left text-xs">
+              <thead className="bg-sidebar text-ink-muted">
+                <tr>
+                  <th className="w-14 px-2 py-2 font-medium">封面</th>
+                  <th className="px-2 py-2 font-medium">标题</th>
+                  <th className="w-14 px-2 py-2 font-medium">类型</th>
+                  <th className="w-24 px-2 py-2 font-medium">发布时间</th>
+                  <th className="w-24 px-2 py-2 font-medium">状态</th>
+                  <th className="w-16 px-2 py-2 font-medium">链接</th>
+                  <th className="w-40 px-2 py-2 font-medium">媒体路径</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(works?.items ?? []).map((w: PersonalWorkItem) => (
+                  <tr key={w.external_id} className="border-t border-line align-middle hover:bg-sidebar/60">
+                    <td className="px-2 py-1.5">
+                      {w.cover_url ? (
+                        <img
+                          src={w.cover_url}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                          className="h-12 w-9 rounded object-cover"
+                          onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }}
+                        />
+                      ) : (
+                        <div className="h-12 w-9 rounded bg-sidebar" />
+                      )}
+                    </td>
+                    <td className="truncate px-2 py-1.5 text-ink" title={w.title ?? ''}>
+                      {w.title || '（无标题）'}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <ToneBadge tone={w.content_type === 'video' ? 'success' : 'warning'} label={w.content_type === 'video' ? '视频' : '图文'} />
+                    </td>
+                    <td className="px-2 py-1.5 text-ink-muted">{(w.published_at || '未知').slice(0, 10)}</td>
+                    <td className="px-2 py-1.5">
+                      <ToneBadge
+                        tone={w.status === 'DOWNLOADED' || w.status === 'DONE' ? 'success' : w.status === 'FAILED' ? 'danger' : 'neutral'}
+                        label={w.status || '—'}
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {w.url ? (
+                        <a href={w.url} target="_blank" rel="noreferrer" className="text-primary hover:underline" title={w.url ?? ''}>
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </a>
+                      ) : '—'}
+                    </td>
+                    <td className="truncate px-2 py-1.5 text-ink-muted" title={w.media_path ?? ''}>
+                      {w.media_path || '—'}
+                    </td>
+                  </tr>
+                ))}
+                {(works?.items?.length ?? 0) === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-2 py-6 text-center text-ink-muted">
+                      没有匹配的作品
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="mt-3 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setWorksPage((p) => Math.max(0, p - 1))}
+            disabled={worksPage === 0}
+            className="rounded-md border border-line px-3 py-1 text-xs text-ink hover:bg-sidebar disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            上一页
+          </button>
+          <button
+            type="button"
+            onClick={() => setWorksPage((p) => (works && (p + 1) * PAGE_SIZE < works.total ? p + 1 : p))}
+            disabled={!works || (worksPage + 1) * PAGE_SIZE >= works.total}
+            className="rounded-md border border-line px-3 py-1 text-xs text-ink hover:bg-sidebar disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            下一页
+          </button>
+          <span className="text-xs text-ink-muted">
+            每页 {PAGE_SIZE} 条
+          </span>
+        </div>
       </Section>
 
       <Section

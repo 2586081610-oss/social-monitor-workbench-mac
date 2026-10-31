@@ -112,3 +112,44 @@ def test_runner_never_carries_download_flag():
     source = inspect.getsource(loop_mod.run_loop)
     assert "--download" not in source
     assert "--source" in source and '"f2"' in source
+
+
+def test_personal_works_endpoint_pagination_and_filters(client, auth_headers, db):
+    """作品清单接口：分页、类型/状态过滤、标题搜索（douyin 平台专属）。"""
+    from app.models import Work
+
+    db.add_all([
+        Work(platform="douyin", external_id=f"dy{i:03d}", title=f"测试作品{i}",
+             content_type="video" if i % 2 else "image", published_at=f"2024-0{1 + i % 9}-01",
+             url=f"https://www.douyin.com/video/dy{i:03d}", cover_url=f"https://cover/{i}.jpg", status="NEW")
+        for i in range(12)
+    ])
+    db.add(Work(platform="douyin", external_id="dydone", title="已完成作品", content_type="video",
+                published_at="2024-05-05", url="https://www.douyin.com/video/dydone", status="DOWNLOADED",
+                media_path="未分组/dydone/video.mp4"))
+    db.commit()
+
+    resp = client.get("/api/v1/personal-source/works?limit=5&offset=0", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 13
+    assert len(data["items"]) == 5
+    first = data["items"][0]
+    for field in ("external_id", "title", "content_type", "published_at", "url", "cover_url", "status", "media_path"):
+        assert field in first
+
+    # 类型过滤
+    resp = client.get("/api/v1/personal-source/works?content_type=image", headers=auth_headers)
+    data = resp.json()["data"]
+    assert data["total"] == 6
+    assert all(item["content_type"] == "image" for item in data["items"])
+
+    # 状态过滤 + 媒体路径
+    resp = client.get("/api/v1/personal-source/works?status=DOWNLOADED", headers=auth_headers)
+    data = resp.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["media_path"].endswith("video.mp4")
+
+    # 标题搜索
+    resp = client.get("/api/v1/personal-source/works?q=已完成", headers=auth_headers)
+    assert resp.json()["data"]["total"] == 1

@@ -117,3 +117,39 @@ export function stopPersonalSyncLoop(): Promise<{ stopped: boolean }> {
 export function getPersonalSyncLoopStatus(): Promise<PersonalSyncLoopStatus> {
   return getJson<PersonalSyncLoopStatus>('/api/v1/personal-source/sync-loop/status');
 }
+
+export interface PersonalWorkItem {
+  external_id: string;
+  title: string | null;
+  content_type: string | null;
+  published_at: string | null;
+  url: string | null;
+  cover_url: string | null;
+  status: string | null;
+  media_path: string | null;
+}
+
+export interface PersonalWorksPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: PersonalWorkItem[];
+}
+
+/** 已抓取的个人来源作品清单（分页+过滤；随爬取轮次实时增长）。 */
+export function getPersonalSourceWorks(params: {
+  limit?: number;
+  offset?: number;
+  content_type?: string | null;
+  status?: string | null;
+  q?: string | null;
+}): Promise<PersonalWorksPage> {
+  const usp = new URLSearchParams();
+  if (params.limit != null) usp.set('limit', String(params.limit));
+  if (params.offset != null) usp.set('offset', String(params.offset));
+  if (params.content_type) usp.set('content_type', params.content_type);
+  if (params.status) usp.set('status', params.status);
+  if (params.q) usp.set('q', params.q);
+  const qs = usp.toString();
+  return getJson<PersonalWorksPage>(`/api/v1/personal-source/works${qs ? `?${qs}` : ''}`);
+}
