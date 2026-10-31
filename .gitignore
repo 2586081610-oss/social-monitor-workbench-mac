@@ -76,3 +76,4 @@ tools/ffmpeg-exe/
 # F2 隔离运行时与个人来源同步产物（登录态/日志只留本地）
 tools/f2-runtime/.venv/
 workbuddy/f2/
+summary_targets/

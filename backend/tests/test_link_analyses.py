@@ -6,6 +6,7 @@ import pytest
 from app.core.config import settings
 from app.core.errors import AppError
 from app.repositories import work_repo
+from app.services import link_analysis_service as service_module
 from app.services.link_analysis_service import parse_link_identity
 
 
@@ -20,9 +21,42 @@ def _payload(**overrides):
     return data
 
 
-def test_create_manual_link_work_is_idempotent_and_visible(client, auth_headers):
+def test_create_manual_link_work_is_idempotent_and_visible(client, auth_headers, monkeypatch):
+    """ingest 现在会拉起完整流水线执行器；测试打桩避免真实子进程。"""
+    launched: list[int] = []
+    monkeypatch.setattr(
+        service_module,
+        "_spawn_single_link_runner",
+        lambda work_id, *, download_only: launched.append((work_id, download_only)) or True,
+    )
     first = client.post("/api/v1/link-analyses", json=_payload(), headers=auth_headers)
     second = client.post("/api/v1/link-analyses", json=_payload(), headers=auth_headers)
+
+    assert first.status_code == 201
+    first_data = first.json()["data"]
+    assert first_data["created"] is True
+    assert first_data["mode"] == "one_time"
+    assert first_data["work"]["source_type"] == "manual"
+    assert first_data["work"]["status"] == "QUEUED"
+
+    assert second.status_code == 201
+    second_data = second.json()["data"]
+    assert second_data["created"] is False
+    assert second_data["work"]["id"] == first_data["work"]["id"]
+
+    # one_time + NEW/QUEUED：两次调用都应拉起完整流水线（非 download-only）
+    assert launched == [(first_data["work"]["id"], False), (first_data["work"]["id"], False)]
+
+    detail = client.get(f"/api/v1/works/{first_data['work']['id']}", headers=auth_headers)
+    assert detail.status_code == 200
+    stages = {stage["stage"]: stage["status"] for stage in detail.json()["data"]["stages"]}
+    assert stages == {
+        "parse": "pending",
+        "download": "pending",
+        "transcribe": "pending",
+        "frames": "pending",
+        "note": "pending",
+    }
 
     assert first.status_code == 201
     first_data = first.json()["data"]

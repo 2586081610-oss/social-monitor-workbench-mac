@@ -41,7 +41,8 @@ def test_runner_processes_only_requested_queued_work(monkeypatch, db):
     result = jobs.process_link_analysis(target.id)
 
     assert result == {"work_id": target.id, "status": "QUEUED"}
-    assert calls == [(target.id, False)]
+    # 2026-10-31 契约变更：完整流水线现在投递总结清单（默认目标可配置）
+    assert calls == [(target.id, True)]
     db.refresh(untouched)
     assert untouched.status == "QUEUED"
 

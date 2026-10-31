@@ -20,6 +20,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import ARCHIVE_PLATFORM_LABELS, settings
+from app.utils.timeutil import now_iso
 from app.core.errors import conflict, not_found, pipeline_offline, validation
 from app.repositories import task_repo, work_repo
 from app.services.archive_metadata_resolver import resolve_archive_metadata
@@ -68,8 +69,8 @@ def _resolve_short_link(url: str) -> str:
         raise validation("LINK_REDIRECT_FAILED") from exc
 
 
-def _spawn_single_link_runner(work_id: int) -> bool:
-    """后台拉起既有单作品 CLI（--download-only），只处理这一条作品。
+def _spawn_single_link_runner(work_id: int, *, download_only: bool = True) -> bool:
+    """后台拉起既有单作品 CLI；download_only=True 仅下载，False 走完整五步流水线。
 
     子进程继承后端环境（同一 venv/数据/媒体配置）；stdout/stderr 落到 logs/
     便于失败排查。启动失败返回 False，由调用方报"执行器不可用"。
@@ -88,7 +89,7 @@ def _spawn_single_link_runner(work_id: int) -> bool:
                 str(root / "tools" / "process_link_analysis.py"),
                 "--work-id",
                 str(work_id),
-                "--download-only",
+                *(["--download-only"] if download_only else []),
             ],
             cwd=str(root),
             stdin=subprocess.DEVNULL,
@@ -197,6 +198,13 @@ class LinkAnalysisService:
 
         existing = work_repo.get_by_platform_external(db, request.platform, request.external_id)
         if existing is not None:
+            # 已存在的待处理作品同样立即执行（幂等：处理中/已完成不重复拉起）
+            if (
+                request.mode == "one_time"
+                and existing.status in {"NEW", "QUEUED"}
+                and not _spawn_single_link_runner(existing.id, download_only=False)
+            ):
+                raise pipeline_offline("SINGLE_LINK_RUNNER_UNAVAILABLE")
             return LinkAnalysisResult(
                 work=WorkSchema.model_validate(existing),
                 created=False,
@@ -208,6 +216,11 @@ class LinkAnalysisService:
         )
         db.commit()
         db.refresh(work)
+        if request.mode == "one_time" and work.status in {"NEW", "QUEUED"}:
+            # one_time 语义：立即对这一条作品执行完整流水线（下载→转写→抽帧→就绪清单），
+            # 不写触发文件、不消费全局队列；执行器拉起失败如实报错。
+            if not _spawn_single_link_runner(work.id, download_only=False):
+                raise pipeline_offline("SINGLE_LINK_RUNNER_UNAVAILABLE")
         return LinkAnalysisResult(
             work=WorkSchema.model_validate(work),
             created=True,
@@ -295,18 +308,36 @@ class LinkAnalysisService:
             message=message,
         )
 
-    def complete_note(self, db: Session, work_id: int, note_path: str) -> WorkSchema:
+    def complete_note(
+        self, db: Session, work_id: int, note_path: str, executor: str | None = None, target: str | None = None
+    ) -> WorkSchema:
+        """确认笔记完成：允许 Obsidian（workbuddy）或任一目录目标的 output 根。
+
+        完成时写 *.provenance.json 回执（执行者/目标/来源/时间）；回执写入
+        失败不影响状态推进，如实反映在 provenance_written。
+        """
+        from app.services import summary_target_service
+
         relative = Path(note_path.replace("\\", "/"))
         if relative.is_absolute() or relative.drive:
             raise validation("NOTE_PATH_INVALID")
-        root = settings.obsidian_root.resolve()
-        candidate = (root / relative).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError:
+        roots = [settings.obsidian_root.resolve()]
+        for spec in summary_target_service.load_summary_settings()["targets"].values():
+            if spec.get("kind") == "directory":
+                roots.append((settings.workspace_root / str(spec.get("root", ""))).resolve() / "output")
+        candidate = None
+        matched_root = None
+        for root in roots:
+            probe = (root / relative).resolve()
+            try:
+                probe.relative_to(root)
+            except ValueError:
+                continue
+            if probe.is_file():
+                candidate, matched_root = probe, root
+                break
+        if candidate is None or candidate.suffix.lower() != ".md":
             raise validation("NOTE_PATH_INVALID") from None
-        if candidate.suffix.lower() != ".md" or not candidate.is_file():
-            raise validation("NOTE_PATH_INVALID")
 
         work = work_repo.get(db, work_id)
         if work is None:
@@ -314,13 +345,30 @@ class LinkAnalysisService:
         work_repo.update(
             db,
             work,
-            note_path=candidate.relative_to(root).as_posix(),
+            note_path=candidate.relative_to(matched_root).as_posix(),
             status="DONE",
         )
         task = task_repo.upsert(db, work.id, "note", "succeeded", attempts=1)
         task.error = None
         db.commit()
         db.refresh(work)
+
+        provenance_written = False
+        try:
+            receipt = {
+                "work_id": work.id,
+                "source_url": work.url,
+                "note_sha256": summary_target_service.sha256_of(candidate),
+                "executor": executor,
+                "target": target or summary_target_service.get_default_target(),
+                "completed_at": now_iso(),
+            }
+            receipt_path = candidate.with_name(candidate.name + ".provenance.json")
+            receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
+            provenance_written = receipt_path.is_file()
+        except OSError:
+            provenance_written = False
+        return WorkSchema.model_validate(work)
         return WorkSchema.model_validate(work)
 
 

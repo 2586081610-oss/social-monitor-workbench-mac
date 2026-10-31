@@ -54,3 +54,5 @@ class LinkAnalysisDownloadResult(BaseModel):
 
 class NoteCompletionRequest(BaseModel):
     note_path: str = Field(min_length=1, max_length=500)
+    executor: str | None = Field(default=None, max_length=60, description="总结执行者（codex/trae/zcode/human 等），用于留痕")
+    target: str | None = Field(default=None, max_length=60, description="交付目标名；None 按默认解析")

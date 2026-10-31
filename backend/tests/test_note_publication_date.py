@@ -2,7 +2,19 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from app.services import note_service as module
+from app.services import summary_target_service
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        summary_target_service,
+        "_settings_path",
+        lambda: tmp_path / "config" / "summary_settings.json",
+    )
 
 
 def test_unknown_publication_not_filled_from_creation_date(monkeypatch, tmp_path):

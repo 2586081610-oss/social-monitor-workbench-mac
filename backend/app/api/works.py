@@ -71,7 +71,11 @@ def analyze_work(work_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{work_id}/complete-note", status_code=200)
 def complete_note(work_id: int, payload: NoteCompletionRequest, db: Session = Depends(get_db)):
-    return ok(link_analysis_service.complete_note(db, work_id, payload.note_path).model_dump())
+    return ok(
+        link_analysis_service.complete_note(
+            db, work_id, payload.note_path, executor=payload.executor, target=payload.target
+        ).model_dump()
+    )
 
 
 @router.post("/{work_id}/classify", status_code=200)

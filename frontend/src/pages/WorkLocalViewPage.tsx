@@ -1,9 +1,12 @@
 /** 作品本地视图：原文件链接 + 本地原文件（预览/列表）+ AI 总结（笔记全文渲染）。 */
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, ExternalLink, FileText, Film, FolderOpen, Image as ImageIcon, RefreshCw } from 'lucide-react';
 import { ErrorState, LoadingState } from '../components/common/StateViews';
 import { useAsyncData } from '../hooks/useApi';
 import { getWorkLocalView } from '../services/works';
+import { listSummaryTargets, setDefaultSummaryTarget } from '../services/summaryTargets';
+import type { SummaryTargetsData } from '../services/summaryTargets';
 import { formatBytes } from '../utils/format';
 import type { LocalMediaFile } from '../types/api.d';
 
@@ -111,6 +114,91 @@ function SimpleMarkdown({ text }: { text: string }) {
   }
   flush();
   return <div className="space-y-0.5">{blocks}</div>;
+}
+
+/** 总结交付目标设置：默认工具可改，素材就绪清单投递到默认目标目录。 */
+function SummaryTargetCard() {
+  const [data, setData] = useState<SummaryTargetsData | null>(null);
+  const [selected, setSelected] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    listSummaryTargets()
+      .then((d) => {
+        if (!alive) return;
+        setData(d);
+        setSelected(d.default_target);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const save = async () => {
+    if (!selected) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const d = await setDefaultSummaryTarget(selected);
+      setData(d);
+      setMessage(`默认总结工具已设为 ${d.default_target}，后续素材就绪清单将投递到该目标目录`);
+    } catch {
+      setMessage('保存失败，请稍后重试');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (failed) {
+    return (
+      <section className="rounded-lg border border-line bg-surface p-4 shadow-card">
+        <h2 className="mb-2 text-sm font-semibold text-ink">总结交付目标</h2>
+        <p className="text-sm text-ink-muted">目标配置读取失败（默认仍为 workbuddy）</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-line bg-surface p-4 shadow-card">
+      <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-ink">
+        <FileText className="h-4 w-4" />
+        总结交付目标
+      </h2>
+      <p className="mb-3 text-xs text-ink-muted">
+        素材就绪清单（含转写/抽帧/来源信息）投递到默认工具的目录，由该工具撰写总结；完成后回执自动留痕。
+      </p>
+      <div className="flex items-center gap-3">
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="rounded border border-line bg-background px-2 py-1.5 text-sm text-ink"
+          aria-label="默认总结工具"
+        >
+          {data?.targets.map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.name}
+              {t.kind === 'workbuddy' ? '（Obsidian 笔记层）' : ''}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving || !selected || selected === data?.default_target}
+          className="rounded border border-line px-3 py-1.5 text-sm text-ink disabled:opacity-50"
+        >
+          {saving ? '保存中…' : '设为默认工具'}
+        </button>
+      </div>
+      {message ? <p className="mt-2 text-xs text-ink-muted">{message}</p> : null}
+    </section>
+  );
 }
 
 export default function WorkLocalViewPage() {
@@ -228,6 +316,9 @@ export default function WorkLocalViewPage() {
               </div>
             )}
           </section>
+
+          {/* ②·五 总结交付目标（默认工具可改，素材就绪清单投递到默认目标） */}
+          <SummaryTargetCard />
 
           {/* ③ AI 总结 */}
           <section className="rounded-lg border border-line bg-surface p-4 shadow-card">

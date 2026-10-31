@@ -991,7 +991,7 @@ def process_link_analysis(work_id: int) -> dict[str, str | int]:
             db.commit()
             return {"work_id": work.id, "status": work.status}
         try:
-            _process_work(db, work, write_pending=False)
+            _process_work(db, work, write_pending=True)
             db.commit()
         except PipelineOfflineError as exc:
             failed_stage = "transcribe" if work.status == "TRANSCRIBING" else "download"
