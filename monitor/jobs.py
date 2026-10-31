@@ -1121,16 +1121,7 @@ def _process_work(
     work.status = "FRAME_EXTRACTING"
     frame_task = task_repo.upsert(db, work.id, "frames", "running", attempts=1)
     frame_task.error = None
-    frames_dir = media_dir / "frames"
-    entries = [
-        {"term": e.term, "action": e.action, "weight": e.weight, "enabled": bool(e.enabled)}
-        for e in lexicon_repo.list_entries(db)
-        if e.enabled
-    ]
-    segments = _load_segments(work.transcript_path)
-    windows = frames.match_windows(segments, entries) if segments else []
-    extracted = frames.extract_frames(video_path, windows, frames_dir)
-    manifest_path = frames.write_manifest(work.id, extracted, frames_dir)
+    manifest_path = run_frames_stage(db, work, video_path, media_dir / "frames")
     work.frame_manifest_path = relative_path_from_root("media", str(manifest_path))
     task_repo.upsert(db, work.id, "frames", "succeeded", attempts=1)
 
@@ -1140,6 +1131,26 @@ def _process_work(
     else:
         note_task = task_repo.upsert(db, work.id, "note", "pending", attempts=0)
         note_task.error = None
+
+
+def run_frames_stage(db: Session, work: Work, video_path: str, frames_dir: Path) -> Path:
+    """抽帧阶段：词库命中窗口 → 定点抽帧；零命中/无时间戳 → 均匀兜底（fallback 标记）。"""
+    entries = [
+        {"term": e.term, "action": e.action, "weight": e.weight, "enabled": bool(e.enabled)}
+        for e in lexicon_repo.list_entries(db)
+        if e.enabled
+    ]
+    segments = _load_segments(work.transcript_path)
+    windows = frames.match_windows(segments, entries) if segments else []
+    fallback = False
+    if not windows:
+        duration = frames.video_duration_seconds(video_path)
+        if duration is not None:
+            windows = frames.uniform_windows(duration)
+            fallback = True
+            logger.info("lexicon zero-hit fallback to uniform sampling: work=%s duration=%.1fs", work.id, duration)
+    extracted = frames.extract_frames(video_path, windows, frames_dir)
+    return frames.write_manifest(work.id, extracted, frames_dir, semantic_aligned=bool(segments), fallback=fallback)
 
 
 def _load_segments(transcript_rel: str | None) -> list[dict]:

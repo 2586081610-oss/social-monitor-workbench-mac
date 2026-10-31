@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -60,6 +61,32 @@ def _frame_count_for_window(window: dict) -> int:
     if net != round(net):
         logger.info("lexicon conflict resolved by net weight: %s", window["hits"])
     return count
+
+
+def video_duration_seconds(video_path: str | Path) -> float | None:
+    """读取视频时长（秒）。本机无 ffprobe，解析 ffmpeg -i 输出；失败如实返回 None（上层放弃兜底）。"""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-i", str(video_path)],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    match = re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)", result.stderr)
+    if not match:
+        return None
+    hours, minutes, seconds = (float(part) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def uniform_windows(duration: float, interval: float = 30.0, max_frames: int = 12) -> list[dict]:
+    """零命中兜底窗口：全片均匀取样（无词库命中），约每 interval 秒一帧，上限 max_frames。"""
+    if duration <= 0:
+        return []
+    count = min(max_frames, max(1, round(duration / interval)))
+    step = duration / count
+    return [{"start": i * step, "end": (i + 1) * step, "hits": []} for i in range(count)]
 
 
 def extract_frames(video_path: str, windows: list[dict], out_dir: Path) -> list[dict]:
