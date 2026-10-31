@@ -198,6 +198,14 @@ class LinkAnalysisService:
 
         existing = work_repo.get_by_platform_external(db, request.platform, request.external_id)
         if existing is not None:
+            # FAILED 作品重新入队重试（与单链接重试同一语义：按 ID 合并不重复）
+            if request.mode == "one_time" and existing.status == "FAILED":
+                from monitor.pipeline.single_link import requeue_failed_for_download
+
+                if not requeue_failed_for_download(db, existing.id):
+                    raise conflict("NOT_RETRYABLE")
+                db.commit()
+                db.refresh(existing)
             # 已存在的待处理作品同样立即执行（幂等：处理中/已完成不重复拉起）
             if (
                 request.mode == "one_time"

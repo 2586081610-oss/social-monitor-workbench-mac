@@ -1093,7 +1093,20 @@ def _process_work(
             note_task.error = None
         return
 
-    video_file = next((item for item in checkpoint.result.files if item.media_type == "video"), checkpoint.result.files[0])
+    video_file = next((item for item in checkpoint.result.files if item.media_type == "video"), None)
+    if video_file is None and any(item.media_type == "image" for item in checkpoint.result.files):
+        # 登记为视频但实际只下到图片（如 xhs 图文笔记被默认登记为 video）：
+        # 如实按图文处理——不转写图片，直接进 AI 笔记阶段。
+        work.content_type = "image"
+        work.status = "NOTE_GENERATING"
+        if write_pending:
+            notify.notify_ready(db, work)
+        else:
+            task_repo.upsert(db, work.id, "note", "pending", attempts=0)
+        db.commit()
+        return
+    if video_file is None:
+        video_file = checkpoint.result.files[0]  # 无视频无图片：维持原回退，由转写如实报错
     video_path = str(video_file.path)
     media_dir = checkpoint.media_dir
 

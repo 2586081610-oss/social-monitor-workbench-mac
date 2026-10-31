@@ -41,6 +41,17 @@ fi
 PATH="$ROOT/tools/bin:$NODE_DIR/bin:$PATH"
 export PATH
 
+# ---- 内置下载器路径（tools/ 自带；用户显式导出的值优先，仅补缺失） ----
+# douyin=jiji262 下载器（480p 档位）；mediacrawler=多平台兜底下载器。
+if [ -z "${DOUYIN_DOWNLOADER_DIR:-}" ] && [ -d "$ROOT/tools/douyin-downloader" ]; then
+  DOUYIN_DOWNLOADER_DIR="$ROOT/tools/douyin-downloader"
+  export DOUYIN_DOWNLOADER_DIR
+fi
+if [ -z "${MEDIACRAWLER_DIR:-}" ] && [ -d "$ROOT/tools/mediacrawler" ]; then
+  MEDIACRAWLER_DIR="$ROOT/tools/mediacrawler"
+  export MEDIACRAWLER_DIR
+fi
+
 # ---- 配置来源：backend/.env 由 config.py 自行加载（仅补缺失键，已导出环境优先）。
 #      本脚本不读取、不回显 .env 内容，避免密钥进入 shell 历史/日志。 ----
 

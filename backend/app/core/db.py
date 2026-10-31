@@ -22,9 +22,13 @@ engine = create_engine(
 
 
 @event.listens_for(engine, "connect")
-def _enable_foreign_keys(dbapi_conn, _record) -> None:
+def _enable_sqlite_pragmas(dbapi_conn, _record) -> None:
+    """WAL + busy_timeout：多个执行器（单链接下载/完整流水线/后端）并发读写同一库时
+    读者不阻塞写者，写锁冲突等待 5 秒而不是立即 'database is locked'。"""
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 
