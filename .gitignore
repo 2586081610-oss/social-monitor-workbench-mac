@@ -20,6 +20,8 @@ workbuddy/pending/
 workbuddy/triggers/
 workbuddy/monitor_heartbeat.json
 workbuddy/onetime_poll.log
+# 评论采集的运行结果（结构化数据、报告、评论图片、任务状态，只留本地）
+workbuddy/xhs_comments/
 
 # 本地历史母库、私有配置与归档运行报告
 /健身/

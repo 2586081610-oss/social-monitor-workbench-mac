@@ -12,6 +12,9 @@ import LexiconPage from './pages/LexiconPage';
 import SettingsPage from './pages/SettingsPage';
 import ArchivePage from './pages/ArchivePage';
 import PersonalSourcePage from './pages/PersonalSourcePage';
+import SingleDownloadPage from './pages/SingleDownloadPage';
+import CommentCollectPage from './pages/CommentCollectPage';
+import CommentResultPage from './pages/CommentResultPage';
 
 export default function App() {
   return (
@@ -26,6 +29,9 @@ export default function App() {
         <Route path="/unclassified" element={<UnclassifiedPage />} />
         <Route path="/archive" element={<ArchivePage />} />
         <Route path="/personal-source" element={<PersonalSourcePage />} />
+        <Route path="/download" element={<SingleDownloadPage />} />
+        <Route path="/comments" element={<CommentCollectPage />} />
+        <Route path="/comments/:noteId" element={<CommentResultPage />} />
         <Route path="/lexicon" element={<LexiconPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

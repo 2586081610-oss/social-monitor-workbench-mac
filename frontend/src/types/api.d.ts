@@ -9,6 +9,7 @@ export type WorkStatus =
   | 'NEW'
   | 'QUEUED'
   | 'DOWNLOADING'
+  | 'DOWNLOADED'
   | 'TRANSCRIBING'
   | 'FRAME_EXTRACTING'
   | 'NOTE_GENERATING'
@@ -342,6 +343,22 @@ export interface LinkAnalysisResult {
   mode: LinkAnalysisMode;
 }
 
+export interface LinkAnalysisIdentifyResult {
+  platform: Exclude<Platform, 'wechat'>;
+  external_id: string;
+}
+
+/** 单链接最低可用下载：只识别、只下载这一条作品。 */
+export interface LinkAnalysisDownloadResult {
+  work: Work;
+  created: boolean;
+  platform: Exclude<Platform, 'wechat'>;
+  external_id: string;
+  content_type: string;
+  processing: boolean;
+  message: string;
+}
+
 export interface NoteCompletionRequest {
   note_path: string;
 }
@@ -482,4 +499,167 @@ export interface PollStatusItem {
 
 export interface PollStatusList {
   items: PollStatusItem[];
+}
+
+// ---------------- xhs comments ----------------
+export type XhsCommentJobStatus = 'queued' | 'running' | 'completed' | 'incomplete' | 'failed';
+export type XhsCommentCompletenessStatus = 'complete' | 'incomplete' | 'failed';
+export type XhsCommentPictureStatus = 'pending' | 'downloaded' | 'failed' | 'skipped';
+
+export interface XhsCommentJobProgress {
+  pages_fetched?: number;
+  comments_fetched?: number;
+  main_comments?: number;
+  replies_fetched?: number;
+  images_total?: number;
+  images_done?: number;
+  images_failed?: number;
+  voice_status?: string;
+  voice_phase?: string;
+  voice_page_mode?: string;
+  voice_pages_scanned?: number;
+  voice_rows?: number;
+  voice_associated?: number;
+  message?: string;
+}
+
+export interface XhsCommentJob {
+  job_id: string;
+  note_id: string;
+  url: string;
+  status: XhsCommentJobStatus;
+  phase: string;
+  mode: 'live' | 'fixture';
+  include_images: boolean;
+  include_voice: boolean;
+  voice_authorized: boolean;
+  voice_allow_open_page: boolean;
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+  result_available: boolean;
+  progress: XhsCommentJobProgress;
+}
+
+export interface XhsCommentPicture {
+  url: string;
+  status: XhsCommentPictureStatus;
+  local_path: string | null;
+  error: string | null;
+  attempts: number;
+  bytes?: number;
+}
+
+export interface XhsCommentVoice {
+  status: 'not_extracted' | 'not_requested' | 'transcript_available' | 'failed';
+  text: string | null;
+  source: string | null;
+  association: 'exact' | 'heuristic' | null;
+  evidence: string | null;
+  raw_nickname?: string | null;
+  carried_from_previous?: boolean;
+}
+
+export interface XhsCommentPinned {
+  status: 'confirmed' | 'probable' | 'none';
+  evidence: string | null;
+}
+
+export interface XhsCommentItem {
+  comment_id: string;
+  parent_comment_id: string;
+  content: string;
+  content_status: 'present' | 'empty';
+  like_count: number;
+  nickname: string;
+  created_at: string | null;
+  created_at_precision: string | null;
+  sub_comment_count_raw: string | number | null;
+  sub_comment_count: number;
+  pictures: XhsCommentPicture[];
+  voice: XhsCommentVoice;
+  picture_analysis: { status: string };
+  pinned: XhsCommentPinned;
+  platform_order: number | null;
+  in_latest: boolean;
+}
+
+export interface XhsCommentCompleteness {
+  status: XhsCommentCompletenessStatus;
+  pages_fetched: number;
+  page_end_reached: boolean;
+  platform_total: number | null;
+  main_fetched: number;
+  replies_fetched: number;
+  reasons: string[];
+  reason_texts: string[];
+  warnings: string[];
+  warning_texts?: string[];
+  reply_shortfall: { comment_id: string; expected: number; fetched: number; raw: string | number | null }[];
+  fatal_error: string | null;
+}
+
+export interface XhsCommentVoiceRun {
+  requested: boolean;
+  status: 'not_requested' | 'not_extracted' | 'extracted' | 'failed';
+  extracted: number;
+  associated: number;
+  unassociated: { text: string; nickname: string | null; like_count: number | null; evidence: string }[];
+  /** 本次语音提取采用的页面来源。 */
+  page_mode?: 'reused' | 'opened' | 'not_found' | 'cdp_unavailable' | 'fixture' | 'opened_failed';
+  cdp_available?: boolean;
+  opened_new_page?: boolean;
+  pages_scanned?: number;
+  matched_page_count?: number;
+  failure_reason?: string | null;
+}
+
+export interface XhsCommentCounts {
+  total_comments: number;
+  main_comments: number;
+  replies: number;
+  unique_users: number;
+  image_comments: number;
+  images_total: number;
+  images_downloaded: number;
+  images_failed: number;
+  voice_transcripts: number;
+  empty_content_comments: number;
+  missing_in_latest: number;
+}
+
+export interface XhsCommentResult {
+  schema_version: number;
+  note_id: string;
+  source_url: string;
+  collected_at: string;
+  first_collected_at: string;
+  collector: { mode: 'live' | 'fixture'; engine: string; started_at?: string };
+  note_meta: { status: string; title: string | null; author: string | null; platform_total: number | null };
+  completeness: XhsCommentCompleteness;
+  order: { main: string; replies: string };
+  pinned_comment_id: string | null;
+  counts: XhsCommentCounts;
+  voice_run: XhsCommentVoiceRun;
+  comments: XhsCommentItem[];
+  report_available?: boolean;
+}
+
+export interface XhsCommentNoteSummary {
+  note_id: string;
+  title: string | null;
+  source_url: string;
+  collected_at: string;
+  first_collected_at: string;
+  mode: 'live' | 'fixture';
+  completeness_status: XhsCommentCompletenessStatus;
+  completeness_reasons: string[];
+  counts: XhsCommentCounts;
+  pinned_comment_id: string | null;
+  voice_status: string;
+  report_available: boolean;
+}
+
+export interface XhsCommentNoteList {
+  items: XhsCommentNoteSummary[];
 }

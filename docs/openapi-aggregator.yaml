@@ -36,6 +36,8 @@ tags:
     description: 监控层手动触发
   - name: wechat
     description: 公众号导入（接口预留）
+  - name: xhs-comments
+    description: 小红书单作品评论采集任务、结构化结果、报告与评论图片
 
 security:
   - bearerAuth: []
@@ -201,6 +203,54 @@ paths:
                   - type: object
                     properties:
                       data: { $ref: '#/components/schemas/LinkAnalysisResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/link-analyses/identify:
+    post:
+      tags: [link-analyses]
+      summary: 识别一条作品链接
+      operationId: identifyLinkAnalysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LinkAnalysisUrl' }
+      responses:
+        '200':
+          description: 已识别平台和作品 ID
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/LinkAnalysisIdentity' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/link-analyses/download:
+    post:
+      tags: [link-analyses]
+      summary: 下载一条作品链接
+      operationId: downloadSingleLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LinkAnalysisUrl' }
+      responses:
+        '200':
+          description: 已识别作品并启动下载，或返回已有结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SingleLinkDownloadResult' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/ValidationError' }
 
@@ -1093,6 +1143,188 @@ paths:
         '501': { $ref: '#/components/responses/NotImplemented' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  # ==================== xhs comments ====================
+  /api/v1/xhs-comments/jobs:
+    post:
+      tags: [xhs-comments]
+      summary: 创建单作品评论采集任务（只处理这一条作品）
+      operationId: createXhsCommentJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/XhsCommentJobCreate' }
+      responses:
+        '202':
+          description: 任务已创建或返回同作品进行中的任务
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/XhsCommentJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/xhs-comments/jobs/{job_id}:
+    get:
+      tags: [xhs-comments]
+      summary: 采集任务进度与状态（含分页/图片/语音计数）
+      operationId: getXhsCommentJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/XhsCommentJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/xhs-comments/jobs/{job_id}/retry:
+    post:
+      tags: [xhs-comments]
+      summary: 按原作品与选项重新采集（结果按评论 ID 合并）
+      operationId: retryXhsCommentJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                voice_authorized:
+                  type: boolean
+                  default: false
+                  description: 原任务包含语音提取时必须重新授权本次操作
+                voice_allow_open_page:
+                  type: boolean
+                  nullable: true
+                  description: 未找到已打开的作品页时是否允许新开标签页；省略则沿用原任务的选择
+      responses:
+        '202':
+          description: 已创建新的采集任务
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/XhsCommentJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/xhs-comments/notes:
+    get:
+      tags: [xhs-comments]
+      summary: 已保存评论结果列表（刷新后重新打开）
+      operationId: listXhsCommentNotes
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: 结果摘要列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: '#/components/schemas/XhsCommentNoteSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/xhs-comments/notes/{note_id}:
+    get:
+      tags: [xhs-comments]
+      summary: 完整结构化评论结果（含完整性状态）
+      operationId: getXhsCommentResult
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 评论结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Envelope' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/XhsCommentResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/xhs-comments/notes/{note_id}/report.md:
+    get:
+      tags: [xhs-comments]
+      summary: 可阅读的 Markdown 评论报告
+      operationId: getXhsCommentReport
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Markdown 报告
+          content:
+            text/markdown:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/xhs-comments/notes/{note_id}/images/{filename}:
+    get:
+      tags: [xhs-comments]
+      summary: 已登记评论图片（仅评论目录内的文件）
+      operationId: getXhsCommentImage
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: filename
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 图片文件
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1174,7 +1406,7 @@ components:
 
     WorkStatus:
       type: string
-      enum: [NEW, QUEUED, DOWNLOADING, TRANSCRIBING, FRAME_EXTRACTING, NOTE_GENERATING, DONE, FAILED, UNCLASSIFIED]
+      enum: [NEW, QUEUED, DOWNLOADING, DOWNLOADED, TRANSCRIBING, FRAME_EXTRACTING, NOTE_GENERATING, DONE, FAILED, UNCLASSIFIED]
 
     SourceType:
       type: string
@@ -1203,6 +1435,31 @@ components:
         mode:
           type: string
           enum: [one_time, monitor]
+
+    LinkAnalysisUrl:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, minLength: 1, maxLength: 2000 }
+
+    LinkAnalysisIdentity:
+      type: object
+      required: [platform, external_id]
+      properties:
+        platform: { type: string, enum: [douyin, bilibili, xhs, twitter] }
+        external_id: { type: string }
+
+    SingleLinkDownloadResult:
+      type: object
+      required: [work, created, platform, external_id, content_type, processing, message]
+      properties:
+        work: { $ref: '#/components/schemas/Work' }
+        created: { type: boolean }
+        platform: { type: string, enum: [douyin, bilibili, xhs, twitter] }
+        external_id: { type: string }
+        content_type: { type: string }
+        processing: { type: boolean }
+        message: { type: string }
 
     NoteCompletionRequest:
       type: object
@@ -1695,6 +1952,163 @@ components:
           type: string
           enum: [online, offline, degraded, unknown]
         detail: { type: string, nullable: true }
+
+    # ---------- xhs comments ----------
+    XhsCommentJobCreate:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, minLength: 1, maxLength: 2000 }
+        include_images: { type: boolean, default: true }
+        include_voice: { type: boolean, default: false }
+        voice_authorized:
+          type: boolean
+          default: false
+          description: 提取语音转写需用户明确授权本次打开作品页
+        voice_allow_open_page:
+          type: boolean
+          default: false
+          description: 未找到已打开的作品页时是否允许新开标签页；需与 voice_authorized 同时为真
+
+    XhsCommentJobProgress:
+      type: object
+      properties:
+        pages_fetched: { type: integer }
+        comments_fetched: { type: integer }
+        main_comments: { type: integer }
+        replies_fetched: { type: integer }
+        images_total: { type: integer }
+        images_done: { type: integer }
+        images_failed: { type: integer }
+        voice_status: { type: string }
+        message: { type: string }
+
+    XhsCommentJob:
+      type: object
+      required: [job_id, note_id, url, status, phase, mode]
+      properties:
+        job_id: { type: string }
+        note_id: { type: string }
+        url: { type: string }
+        status:
+          type: string
+          enum: [queued, running, completed, incomplete, failed]
+        phase: { type: string }
+        mode:
+          type: string
+          enum: [live, fixture]
+          description: fixture 表示模拟数据，未访问真实平台
+        include_images: { type: boolean }
+        include_voice: { type: boolean }
+        voice_authorized: { type: boolean }
+        voice_allow_open_page: { type: boolean }
+        created_at: { type: string }
+        updated_at: { type: string }
+        error: { type: string, nullable: true }
+        result_available: { type: boolean }
+        progress: { $ref: '#/components/schemas/XhsCommentJobProgress' }
+
+    XhsCommentCompleteness:
+      type: object
+      required: [status, pages_fetched, page_end_reached]
+      properties:
+        status:
+          type: string
+          enum: [complete, incomplete, failed]
+        pages_fetched: { type: integer }
+        page_end_reached: { type: boolean }
+        platform_total: { type: integer, nullable: true }
+        main_fetched: { type: integer }
+        replies_fetched: { type: integer }
+        reasons: { type: array, items: { type: string } }
+        reason_texts: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+        warning_texts: { type: array, items: { type: string } }
+        reply_shortfall:
+          type: array
+          items:
+            type: object
+            properties:
+              comment_id: { type: string }
+              expected: { type: integer }
+              fetched: { type: integer }
+        fatal_error: { type: string, nullable: true }
+
+    XhsCommentResult:
+      type: object
+      required: [note_id, source_url, collected_at, completeness, comments]
+      properties:
+        schema_version: { type: integer }
+        note_id: { type: string }
+        source_url: { type: string }
+        collected_at: { type: string }
+        first_collected_at: { type: string }
+        collector:
+          type: object
+          properties:
+            mode: { type: string, enum: [live, fixture] }
+            engine: { type: string }
+        note_meta:
+          type: object
+          properties:
+            status: { type: string }
+            title: { type: string, nullable: true }
+            author: { type: string, nullable: true }
+            platform_total: { type: integer, nullable: true }
+        completeness: { $ref: '#/components/schemas/XhsCommentCompleteness' }
+        order:
+          type: object
+          properties:
+            main: { type: string, example: like_desc }
+            replies: { type: string, example: like_desc }
+        pinned_comment_id: { type: string, nullable: true }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+        voice_run:
+          type: object
+          properties:
+            requested: { type: boolean }
+            status: { type: string, enum: [not_requested, extracted, not_extracted, failed] }
+            page_mode: { type: string }
+            cdp_available: { type: boolean }
+            opened_new_page: { type: boolean }
+            pages_scanned: { type: integer }
+            matched_page_count: { type: integer }
+            failure_reason: { type: string, nullable: true }
+            extracted: { type: integer }
+            associated: { type: integer }
+            unassociated:
+              type: array
+              items:
+                type: object
+                properties:
+                  text: { type: string }
+                  nickname: { type: string, nullable: true }
+                  like_count: { type: integer, nullable: true }
+                  evidence: { type: string }
+        comments:
+          type: array
+          items: { type: object, additionalProperties: true }
+        report_available: { type: boolean }
+
+    XhsCommentNoteSummary:
+      type: object
+      properties:
+        note_id: { type: string }
+        title: { type: string, nullable: true }
+        source_url: { type: string }
+        collected_at: { type: string }
+        first_collected_at: { type: string }
+        mode: { type: string, enum: [live, fixture] }
+        completeness_status: { type: string, enum: [complete, incomplete, failed] }
+        completeness_reasons: { type: array, items: { type: string } }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+        pinned_comment_id: { type: string, nullable: true }
+        voice_status: { type: string }
+        report_available: { type: boolean }
 
     # ---------- wechat ----------
     WechatImportRequest:
