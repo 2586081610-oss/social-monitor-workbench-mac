@@ -116,6 +116,183 @@ function SimpleMarkdown({ text }: { text: string }) {
   return <div className="space-y-0.5">{blocks}</div>;
 }
 
+/** 文件查看类型：转写按字幕渲染，CSV 按表格，MD 按排版，JSON 格式化，其余原样。 */
+type ViewerKind = 'transcript' | 'csv' | 'md' | 'json' | 'text';
+
+function viewerKindOf(f: LocalMediaFile): ViewerKind {
+  if (f.label === '语音转写') return 'transcript';
+  const dot = f.name.lastIndexOf('.');
+  const suffix = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
+  if (suffix === '.csv') return 'csv';
+  if (suffix === '.md') return 'md';
+  if (suffix === '.json') return 'json';
+  return 'text';
+}
+
+function formatSeconds(s: number): string {
+  const total = Math.max(0, Math.floor(s));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/** 极简 CSV 解析：处理引号包裹与字段内换行（作品标题含 # 标签换行的实际场景）。 */
+function parseCsv(text: string): string[][] {
+  const body = text.replace(/^\uFEFF/, '');
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (body[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else inQuotes = false;
+      } else cell += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\n') {
+      row.push(cell.replace(/\r$/, ''));
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else cell += ch;
+  }
+  if (cell !== '' || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => c.trim() !== ''));
+}
+
+/** 本地文件网页内查看弹窗：取文件内容并按类型渲染；原始文件仍可另开标签。 */
+function FileViewerModal({ file, onClose }: { file: LocalMediaFile; onClose: () => void }) {
+  const [state, setState] = useState<{ loading: boolean; error: string | null; text: string | null }>({
+    loading: true,
+    error: null,
+    text: null,
+  });
+
+  useEffect(() => {
+    let alive = true;
+    setState({ loading: true, error: null, text: null });
+    fetch(file.url)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.text();
+      })
+      .then((t) => {
+        if (alive) setState({ loading: false, error: null, text: t });
+      })
+      .catch((e: unknown) => {
+        if (alive) setState({ loading: false, error: e instanceof Error ? e.message : String(e), text: null });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [file.url]);
+
+  const kind = viewerKindOf(file);
+  let body: React.ReactNode = null;
+  if (state.loading) {
+    body = <p className="text-sm text-ink-muted">加载中…</p>;
+  } else if (state.error || state.text === null) {
+    body = <p className="text-sm text-red-600">读取失败：{state.error ?? '未知错误'}</p>;
+  } else if (kind === 'transcript') {
+    let rendered: React.ReactNode = null;
+    try {
+      const parsed = JSON.parse(state.text) as {
+        engine?: string;
+        created_at?: string;
+        segments?: { start: number; end: number; text: string }[];
+      };
+      if (Array.isArray(parsed.segments)) {
+        rendered = (
+          <div className="space-y-1">
+            <p className="mb-3 text-xs text-ink-muted">
+              转写引擎：{parsed.engine ?? '未知'} · 共 {parsed.segments.length} 句
+            </p>
+            {parsed.segments.map((seg, i) => (
+              <div key={i} className="flex gap-3 text-sm">
+                <span className="shrink-0 font-mono text-xs text-ink-muted">
+                  {formatSeconds(seg.start)} – {formatSeconds(seg.end)}
+                </span>
+                <span className="text-ink">{seg.text}</span>
+              </div>
+            ))}
+          </div>
+        );
+      }
+    } catch {
+      rendered = null;
+    }
+    body = rendered ?? <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-xs text-ink-secondary">{state.text}</pre>;
+  } else if (kind === 'csv') {
+    const rows = parseCsv(state.text);
+    const header = rows[0] ?? [];
+    body = (
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="bg-sidebar">
+            {header.map((h, i) => (
+              <th key={i} className="border border-line px-2 py-1 text-left font-medium text-ink">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(1).map((r, ri) => (
+            <tr key={ri}>
+              {header.map((_, ci) => (
+                <td key={ci} className="border border-line px-2 py-1 align-top text-ink-secondary">
+                  {r[ci] ?? ''}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  } else if (kind === 'md') {
+    body = <SimpleMarkdown text={state.text} />;
+  } else if (kind === 'json') {
+    let pretty = state.text;
+    try {
+      pretty = JSON.stringify(JSON.parse(state.text), null, 2);
+    } catch {
+      /* 非 JSON 原样显示 */
+    }
+    body = <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-xs text-ink-secondary">{pretty}</pre>;
+  } else {
+    body = <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-xs text-ink-secondary">{state.text}</pre>;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-line bg-surface shadow-card"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+          <span className="whitespace-nowrap rounded bg-sidebar px-1.5 py-0.5 text-xs text-ink-secondary">{file.label ?? '其他'}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-secondary">{file.name}</span>
+          <a href={file.url} target="_blank" rel="noreferrer" title="在新标签打开原文件" className="shrink-0 text-ink-muted hover:text-primary">
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+          <button type="button" onClick={onClose} className="shrink-0 text-ink-muted hover:text-primary" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-4">{body}</div>
+      </div>
+    </div>
+  );
+}
+
 /** 总结交付目标设置：默认工具可改，素材就绪清单投递到默认目标目录。 */
 function SummaryTargetCard() {
   const [data, setData] = useState<SummaryTargetsData | null>(null);
@@ -211,6 +388,7 @@ export default function WorkLocalViewPage() {
   const videos = mediaFiles.filter(isVideo);
   const images = mediaFiles.filter(isImage);
   const others = mediaFiles.filter((f) => !isVideo(f) && !isImage(f));
+  const [viewerFile, setViewerFile] = useState<LocalMediaFile | null>(null);
 
   return (
     <div className="space-y-5">
@@ -278,7 +456,10 @@ export default function WorkLocalViewPage() {
             ) : (
               <div className="space-y-4">
                 {videos.map((v) => (
-                  <video key={v.path} src={v.url} controls className="max-h-96 w-full rounded-lg bg-black" preload="metadata" />
+                  <div key={v.path} className="space-y-1">
+                    <span className="inline-block rounded bg-sidebar px-1.5 py-0.5 text-xs text-ink-secondary">{v.label ?? '视频文件'}</span>
+                    <video src={v.url} controls className="max-h-96 w-full rounded-lg bg-black" preload="metadata" />
+                  </div>
                 ))}
                 {images.length ? (
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
@@ -294,6 +475,7 @@ export default function WorkLocalViewPage() {
                   <table className="w-full border-collapse text-sm">
                     <thead>
                       <tr className="bg-sidebar">
+                        <th className="border border-line px-2 py-1.5 text-left font-medium text-ink">类型</th>
                         <th className="border border-line px-2 py-1.5 text-left font-medium text-ink">文件</th>
                         <th className="border border-line px-2 py-1.5 text-right font-medium text-ink">大小</th>
                       </tr>
@@ -302,10 +484,23 @@ export default function WorkLocalViewPage() {
                       {others.map((f) => (
                         <tr key={f.path}>
                           <td className="border border-line px-2 py-1">
-                            <a href={f.url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 font-mono text-xs text-ink-secondary hover:text-primary">
-                              <FileText className="h-3.5 w-3.5 shrink-0" />
-                              <span className="break-all">{f.path}</span>
-                            </a>
+                            <span className="whitespace-nowrap rounded bg-sidebar px-1.5 py-0.5 text-xs text-ink-secondary">{f.label ?? '其他'}</span>
+                          </td>
+                          <td className="border border-line px-2 py-1">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setViewerFile(f)}
+                                title="在页面内查看"
+                                className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-ink-secondary hover:text-primary"
+                              >
+                                <FileText className="h-3.5 w-3.5 shrink-0" />
+                                <span className="break-all">{f.path}</span>
+                              </button>
+                              <a href={f.url} target="_blank" rel="noreferrer" title="在新标签打开原文件" className="shrink-0 text-ink-muted hover:text-primary">
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            </div>
                           </td>
                           <td className="border border-line px-2 py-1 text-right font-mono text-xs text-ink-muted">{formatBytes(f.size)}</td>
                         </tr>
@@ -343,6 +538,8 @@ export default function WorkLocalViewPage() {
           媒体由本地静态服务提供（/media/…），仅本机可访问
         </p>
       ) : null}
+
+      {viewerFile ? <FileViewerModal file={viewerFile} onClose={() => setViewerFile(null)} /> : null}
     </div>
   );
 }

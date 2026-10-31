@@ -292,6 +292,7 @@ export interface LocalMediaFile {
   size: number;
   path: string;
   url: string;
+  label?: string;
 }
 
 export interface WorkLocalView {

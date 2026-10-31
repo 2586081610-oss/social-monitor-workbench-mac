@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,7 +27,33 @@ def _abs_media(path: str | None) -> str | None:
     return f"{base}{path}"
 
 
+def _media_url(rel: str) -> str:
+    """media 相对路径 → /media URL；文件名含 # 或空格时必须转义，否则浏览器把 # 当锚点截断请求导致 404。"""
+    return "/media/" + quote(rel, safe="/")
+
+
 _ARCHIVE_STATUS_PRIORITY = {"verified": 1, "needs_review": 2, "failed": 3, "conflict": 4}
+
+
+def _file_label(rel: str, name: str) -> str:
+    """本地文件类型标注：按所在目录归类（转写/抽帧），再按扩展名与元数据文件名细分。"""
+    rel_l = rel.lower()
+    suffix = Path(name).suffix.lower()
+    if "/transcript/" in rel_l:
+        return "语音转写"
+    if "/frames/" in rel_l:
+        return "抽帧清单" if name == "frame_manifest.json" else "关键帧"
+    if suffix in {".mp4", ".webm", ".mov", ".mkv", ".avi", ".flv"}:
+        return "视频文件"
+    if suffix in {".mp3", ".m4a", ".aac", ".wav", ".flac"}:
+        return "音频文件"
+    if name == "作品信息.json":
+        return "元数据 JSON"
+    if name == "作品信息.csv":
+        return "元数据 CSV"
+    if name == "作品信息.md":
+        return "元数据 Markdown"
+    return "其他"
 
 
 def _archive_statuses(db: Session, work_ids: list[int]) -> dict[int, str]:
@@ -86,7 +113,7 @@ def _resolve_note_images(note_abs: Path, md: str, media_root: Path) -> str:
         try:
             abs_path = (note_abs.parent / rel).resolve()
             abs_path.relative_to(media_root)
-            url = "/media/" + abs_path.relative_to(media_root).as_posix()
+            url = _media_url(abs_path.relative_to(media_root).as_posix())
             return f"{m.group(1)}{url})"
         except (ValueError, OSError):
             return full
@@ -180,12 +207,13 @@ class WorkService:
                                     "name": f.name,
                                     "size": f.stat().st_size,
                                     "path": rel,
-                                    "url": _abs_media(f"/media/{rel}") or f"/media/{rel}",
+                                    "label": _file_label(rel, f.name),
+                                    "url": _abs_media(_media_url(rel)) or _media_url(rel),
                                 }
                             )
                 elif base.is_file():
                     rel = base.relative_to(media_root).as_posix()
-                    files.append({"name": base.name, "size": base.stat().st_size, "path": rel, "url": _abs_media(f"/media/{rel}") or f"/media/{rel}"})
+                    files.append({"name": base.name, "size": base.stat().st_size, "path": rel, "label": _file_label(rel, base.name), "url": _abs_media(_media_url(rel)) or _media_url(rel)})
             except OSError:
                 pass
 
