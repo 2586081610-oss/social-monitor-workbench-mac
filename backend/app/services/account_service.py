@@ -4,7 +4,8 @@
 - bilibili: api.bilibili.com/x/web-interface/nav（isLogin 字段，无需签名）
 - douyin:   cookie 必须含会话键（sessionid*），passport/account/info/v2 探测；探测不可达时降级 WARN
 - xhs:      cookie 必须含 web_session，selfinfo 探测
-- twitter:  cookie 必须含 auth_token，verify_credentials 探测（该站常需代理，网络不可达如实 WARN）
+- twitter:  cookie 必须含 auth_token，verify_credentials 探测（该站常需代理，网络不可达如实 WARN；
+            v1.1 端点已下线返回 404，同样如实 WARN 而非误报未登录）
 
 Cookie 落盘（切换账号 = 覆写后立即校验）：
 - douyin → config/f2/douyin_cookie.txt（F2_DOUYIN_COOKIE_FILE 可覆盖，F2 个人来源消费）
@@ -205,6 +206,15 @@ def _check_twitter(cookie: str) -> tuple[str, str]:
     )
     if resp is None:
         return "WARN", "有 auth_token 但网络不可达（该站通常需代理），未完成在线校验"
+    if resp.status_code == 404:
+        # v1.1 verify_credentials 在 api.x.com / x.com/i/api 均已下线（实测
+        # 2026-10-31，响应 code 34；补 x-twitter-auth-type: JWT 头同样 404）。
+        # 404 是端点消亡而非登录失败：凭证含 auth_token+ct0 时如实 WARN，
+        # 有效性以推特下载管道实际运行为准，不冒充「未登录」。
+        return (
+            "WARN",
+            "校验端点已下线（HTTP 404），无法在线判定；凭证含 auth_token+ct0，以采集实际运行为准",
+        )
     if resp.status_code != 200:
         return "NEEDS_RELOGIN", f"推特在线校验未通过（HTTP {resp.status_code}）"
     try:
