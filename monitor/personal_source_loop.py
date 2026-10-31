@@ -118,11 +118,12 @@ def run_loop(
         )
         write_state(f2_dir, state)
 
-        if summary["poll_status"] == "failed":
+        # poll 状态实际值为 fail（ingest 写入），防御性同时接受 failed
+        if summary["poll_status"] in ("fail", "failed"):
             consecutive_failures += 1
         else:
             consecutive_failures = 0
-        if summary["poll_status"] == "ok":
+        if summary["poll_status"] in ("ok", "complete"):
             final_status = "all_complete"
             log("all scopes complete")
             break

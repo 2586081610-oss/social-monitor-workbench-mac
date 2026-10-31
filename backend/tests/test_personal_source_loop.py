@@ -57,7 +57,7 @@ def test_run_loop_stops_on_ok(tmp_path, monkeypatch):
 
 
 def test_run_loop_stops_on_three_consecutive_failures(tmp_path, monkeypatch):
-    monkeypatch.setattr(loop_mod, "_poll_summary", _poll_factory(["failed", "failed", "failed"]))
+    monkeypatch.setattr(loop_mod, "_poll_summary", _poll_factory(["fail", "fail", "fail"]))
     monkeypatch.setattr(loop_mod.time, "sleep", lambda s: None)
     state = loop_mod.run_loop(
         max_rounds=10, f2_dir=tmp_path / "f2", db_path=tmp_path / "db.sqlite",
@@ -188,3 +188,15 @@ def test_personal_works_source_filter_and_marks(client, auth_headers, db):
     assert by_id["mboth"]["folder_name"] == "我的宝藏夹"
     assert by_id["mboth"]["occurred_at"].startswith("2026-01-01")
     assert by_id["mfav"]["source_marks"] == ["favorite"]
+
+
+def test_run_loop_breaker_treats_fail_and_failed_alike(tmp_path, monkeypatch):
+    """真实 poll 状态值是 fail（曾因字符串不匹配导致熔断失效）——两者都必须计数。"""
+    monkeypatch.setattr(loop_mod, "_poll_summary", _poll_factory(["fail", "failed", "fail"]))
+    monkeypatch.setattr(loop_mod.time, "sleep", lambda s: None)
+    state = loop_mod.run_loop(
+        max_rounds=10, f2_dir=tmp_path / "f2", db_path=tmp_path / "db.sqlite",
+        python_exe="python", workspace=tmp_path, log=lambda m: None,
+    )
+    assert state["final_status"] == "aborted_consecutive_failures"
+    assert state["rounds_done"] == 3
