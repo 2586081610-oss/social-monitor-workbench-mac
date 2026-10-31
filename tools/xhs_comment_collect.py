@@ -1143,7 +1143,10 @@ async def _collect_live_async(
     download_live_images(store, comments, include_images, lambda code: warn(code, reasons), progress)
 
     progress(phase="extracting_voice")
-    voice_run = voice_live(
+    # voice_live 内部用 Playwright 同步 API：必须在本事件循环之外的线程执行，
+    # 否则 Playwright 抛「Sync API inside the asyncio loop」直接失败（实测 2026-10-31）。
+    voice_run = await asyncio.to_thread(
+        voice_live,
         store,
         comments,
         url,
