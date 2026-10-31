@@ -74,8 +74,28 @@ _COLLECTS_ABORT_KINDS = frozenset({"login_expired", "rate_limited", "redirect_re
 # 单个 403 仍按 platform_error 如实上报，不武断解释为登录过期或限流。
 _MAX_CONSECUTIVE_FOLDER_FAILURES = 2
 
+# 收藏夹内容连续多少轮不可读（aweme_list=null）后按「不可访问」收尾：实测
+# （2026-10-31）夹存在且 total_number>0 时平台仍可能返回 null——夹内作品已被
+# 作者删除/设私密，或瞬时风控；跨轮计 streak，避免同夹永久重试，也避免把
+# 瞬时不可读误当空夹跳过。
+_MAX_FOLDER_UNAVAILABLE_ROUNDS = 3
+
 # 整体预算到期后的收尾宽限（用于把已完成结果落盘）；到期本身按 partial 上报。
 _BUDGET_GRACE_SECONDS = 5.0
+
+
+def _is_unavailable_null_list(response: dict) -> bool:
+    """收藏夹作品列表的「不可访问」形状：aweme_list 键存在但非列表，且 has_more=0。
+
+    实测（2026-10-31）夹存在、total_number>0 时平台仍可能如此返回——夹内作品
+    已被作者删除/设私密，或瞬时风控。它不是空夹（空夹是 aweme_list=[]），
+    也不是可重试错误（当前设计会永久重试导致轮询 partial）。
+    """
+    return (
+        "aweme_list" in response
+        and not isinstance(response.get("aweme_list"), list)
+        and not response.get("has_more")
+    )
 _BUDGET_WARNING = "整体时间预算到期：已保留已完成结果，其余范围/夹标记不完整"
 
 # 跨运行续传状态版本；只保存哈希身份、分页游标与完成标记，不保存 Cookie/明文标识。
@@ -1314,6 +1334,34 @@ async def fetch_collections_scope(handler, args, result: dict, warnings: list, *
             done_label = f"folder#{ordinal}"
             if done_label in folder_incomplete:
                 folder_incomplete.remove(done_label)
+        elif meta.get("unavailable"):
+            # 夹内容不可读（aweme_list=null）：跨轮计 streak，连续
+            # _MAX_FOLDER_UNAVAILABLE_ROUNDS 轮仍不可读才按不可访问收尾；
+            # 期间如实算不完整。不计入 consecutive_failures（数据条件而非请求错误）。
+            streak = int(previous.get("unavailable_streak") or 0) if isinstance(previous, dict) else 0
+            streak += 1
+            if streak >= _MAX_FOLDER_UNAVAILABLE_ROUNDS:
+                if folder_progress is not None:
+                    folder_progress[folder_key] = {"complete": True, "cursor": 0, "unavailable": True}
+                folder_items[folder_id] = {
+                    "pages": meta["pages"], "items": 0, "complete": True, "unavailable": True,
+                }
+                warnings.append(
+                    f"{label} 连续 {streak} 轮内容不可读（aweme_list=null），按不可访问收藏夹收尾")
+            else:
+                if folder_progress is not None:
+                    folder_progress[folder_key] = {
+                        "complete": False, "cursor": 0, "unavailable_streak": streak,
+                    }
+                folder_items[folder_id] = {
+                    "pages": meta["pages"], "items": 0, "complete": False, "unavailable": True,
+                    "unavailable_streak": streak,
+                }
+                _mark_folder_incomplete(ordinal)
+                all_items_complete = False
+                warnings.append(
+                    f"{label} 内容不可读（aweme_list=null），"
+                    f"第 {streak}/{_MAX_FOLDER_UNAVAILABLE_ROUNDS} 轮，暂记不完整")
         else:
             _mark_folder_incomplete(ordinal)
             if meta.get("budget_exhausted") is True:
@@ -1360,7 +1408,9 @@ async def _fetch_folder_items_raw(handler, folder_id: str, *, label: str, args, 
     就结束，无法区分"合法空夹"与"上游失败"。这里直接调用底层 crawler 并对原始
     响应严格校验：
     - status_code=8 → login_expired（夹内登录失效正确分类）；
-    - aweme_list 缺失/非列表 → platform_error；
+    - aweme_list=null 且 has_more=0 → 夹内作品不可访问（夹存在但内容取不出），
+      返回 unavailable 标记由调用方跨轮计 streak（连续多轮才按不可访问收尾）；
+    - aweme_list 缺失/其他非列表 → platform_error；
     - `aweme_list=[]` 且 has_more=0 → 合法空夹（complete，继续其他夹）；
     - has_more 键缺失 → 不完整；页数/条数预算 → 不完整；
     - 整体截止到期 → 返回已读页并标记 budget_exhausted，`on_cursor` 记录游标
@@ -1410,9 +1460,18 @@ async def _fetch_folder_items_raw(handler, folder_id: str, *, label: str, args, 
             status_error = _payload_status_kind(status_code)
             if status_error is not None:
                 raise ScopeError(status_error[0], f"{label} {status_error[1]}")
-            if not isinstance(response, dict) or "aweme_list" not in response \
-                    or not isinstance(response.get("aweme_list"), list):
+            if not isinstance(response, dict) or "aweme_list" not in response:
                 raise ScopeError("platform_error", f"{label} 响应缺少 aweme_list 字段")
+            if not isinstance(response.get("aweme_list"), list):
+                if _is_unavailable_null_list(response):
+                    # 夹存在但内容取不出（aweme_list=null）：交由调用方跨轮计
+                    # streak，连续多轮仍不可读才按不可访问收尾；has_more=1 时
+                    # 的 null 仍按真异常报错（无法安全解释）。
+                    warnings.append(
+                        f"{label} 响应 aweme_list 为 {type(response.get('aweme_list')).__name__}"
+                        "（夹内作品不可访问或瞬时不可读）")
+                    return [], {"pages": pages, "items": 0, "complete": False, "unavailable": True}
+                raise ScopeError("platform_error", f"{label} 响应 aweme_list 不是列表")
             aweme_list = response["aweme_list"]
             if len(aweme_list) > args.page_counts:
                 oversize_pages += 1

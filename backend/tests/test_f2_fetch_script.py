@@ -2210,3 +2210,78 @@ def test_progress_confirm_failure_rounds_hold_state_and_recovery_rediscovers(
     assert fourth["like"]["complete"] is True
     assert fetch.write_confirmed_progress(str(progress), fourth["resume"]) is True
     assert not progress.exists()
+
+
+# ---------- 收藏夹内容不可读（aweme_list=null）跨轮 streak ----------
+
+def test_unavailable_null_list_classification():
+    assert fetch._is_unavailable_null_list({"aweme_list": None, "has_more": 0})
+    assert fetch._is_unavailable_null_list({"aweme_list": "x", "has_more": False})
+    assert not fetch._is_unavailable_null_list({"aweme_list": [], "has_more": 0})  # 合法空夹
+    assert not fetch._is_unavailable_null_list({"aweme_list": None, "has_more": 1})  # 真异常
+    assert not fetch._is_unavailable_null_list({"has_more": 0})  # 键缺失 → platform_error
+
+
+class _StubCollectsHandler:
+    """单页收藏夹目录（has_more=0），供 fetch_collections_scope 消费。"""
+
+    def __init__(self, folder_ids: list[str]):
+        self._ids = folder_ids
+
+    def fetch_user_collects(self, *, max_cursor=0, page_counts=20, max_counts=2000):
+        rows = [
+            {"collects_id": fid, "collects_name": f"夹{i}", "total_number": 1}
+            for i, fid in enumerate(self._ids, start=1)
+        ]
+
+        async def _gen():
+            yield _FakePage({"status_code": 0, "collects_list": rows, "has_more": 0, "cursor": 0})
+
+        return _gen()
+
+
+def test_folder_unavailable_streak_semantics(monkeypatch):
+    """aweme_list=null 的夹：跨轮计 streak，连续 3 轮不可读才按不可访问收尾。"""
+    import argparse
+
+    ids = [f"fid-{i}" for i in range(2)]
+    calls: list[str] = []
+
+    async def _fake_fetch(handler, folder_id, *, label, args, warnings, start_cursor=0,
+                          deadline=None, on_cursor=None, on_partial=None):
+        calls.append(folder_id)
+        return [], {"pages": 1, "items": 0, "complete": False, "unavailable": True}
+
+    monkeypatch.setattr(fetch, "_fetch_folder_items_raw", _fake_fetch)
+    args = argparse.Namespace(page_counts=20, max_items_per_list=1000, max_pages_per_list=10,
+                              folder_ids="")
+    scope_progress: dict = {"folders": {}}
+
+    for round_no in (1, 2):
+        warnings: list[str] = []
+        result: dict = {}
+        asyncio.run(fetch.fetch_collections_scope(
+            _StubCollectsHandler(ids), args, result, warnings, scope_progress=scope_progress))
+        collects = result["collects"]
+        assert collects["complete"] is False
+        assert collects["folder_incomplete"] == ["folder#1", "folder#2"]
+        assert any("暂记不完整" in w for w in warnings)
+        for fid in ids:
+            entry = scope_progress["folders"][fetch._identity_hash(fid)]
+            assert entry == {"complete": False, "cursor": 0, "unavailable_streak": round_no}
+
+    warnings = []
+    result: dict = {}
+    asyncio.run(fetch.fetch_collections_scope(
+        _StubCollectsHandler(ids), args, result, warnings, scope_progress=scope_progress))
+    # 第 3 轮：streak 到顶 → 按不可访问收尾（complete+unavailable），不再计入不完整
+    collects = result["collects"]
+    assert collects["complete"] is True
+    assert collects["folder_incomplete"] == []
+    for row in collects["folder_items"].values():
+        assert row["complete"] is True and row["unavailable"] is True
+    assert any("按不可访问收藏夹收尾" in w for w in warnings)
+    for fid in ids:
+        entry = scope_progress["folders"][fetch._identity_hash(fid)]
+        assert entry == {"complete": True, "cursor": 0, "unavailable": True}
+    assert len(calls) == 6  # 2 夹 × 3 轮，收尾后不再请求
