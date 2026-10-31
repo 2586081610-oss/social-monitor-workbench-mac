@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -87,9 +87,17 @@ def _load_platform_cookies() -> dict[str, Any]:
 
 
 def _resolve_xhs_download_url(url: str) -> str:
-    """保留分享短链首跳的作品地址，避免下载器继续跳到登录页面。"""
+    """保留分享短链首跳的作品地址，避免下载器继续跳到登录页面。
+
+    裸域 `xiaohongshu.com` 归一化为 `www.xiaohongshu.com`：XHS-Downloader 的
+    链接提取只认 www 域名，裸域会报「提取小红书作品链接失败」但退出码为 0
+    （实测 2026-10-31），管道只能看到"无新产出"的离线错误。
+    """
     try:
-        if (urlsplit(url).hostname or "").lower() not in {"xhslink.com", "xhslink.cn"}:
+        parsed = urlsplit(url)
+        if parsed.hostname and parsed.hostname.lower() == "xiaohongshu.com":
+            return urlunsplit(("https", "www.xiaohongshu.com", parsed.path, parsed.query, parsed.fragment))
+        if (parsed.hostname or "").lower() not in {"xhslink.com", "xhslink.cn"}:
             return url
         response = httpx.get(url, follow_redirects=False, timeout=10.0)
         location = response.headers.get("location") if 300 <= response.status_code < 400 else None
