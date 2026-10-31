@@ -127,6 +127,9 @@ export interface PersonalWorkItem {
   cover_url: string | null;
   status: string | null;
   media_path: string | null;
+  source_marks: string[];
+  folder_name: string | null;
+  occurred_at: string | null;
 }
 
 export interface PersonalWorksPage {
@@ -143,6 +146,7 @@ export function getPersonalSourceWorks(params: {
   content_type?: string | null;
   status?: string | null;
   q?: string | null;
+  source_mark?: string | null;
 }): Promise<PersonalWorksPage> {
   const usp = new URLSearchParams();
   if (params.limit != null) usp.set('limit', String(params.limit));
@@ -150,6 +154,7 @@ export function getPersonalSourceWorks(params: {
   if (params.content_type) usp.set('content_type', params.content_type);
   if (params.status) usp.set('status', params.status);
   if (params.q) usp.set('q', params.q);
+  if (params.source_mark) usp.set('source_mark', params.source_mark);
   const qs = usp.toString();
   return getJson<PersonalWorksPage>(`/api/v1/personal-source/works${qs ? `?${qs}` : ''}`);
 }

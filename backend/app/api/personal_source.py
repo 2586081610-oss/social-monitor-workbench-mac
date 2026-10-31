@@ -88,11 +88,13 @@ def get_personal_works(
     content_type: str | None = None,
     status: str | None = None,
     q: str | None = None,
+    source_mark: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """已抓取的个人来源作品清单（作品ID/标题/类型/发布时间/链接/封面/状态/媒体路径）。"""
+    """已抓取的个人来源作品清单（作品ID/标题/类型/发布时间/链接/封面/状态/媒体路径/来源标记）。"""
     return ok(
         personal_source_service.list_personal_works(
-            db, limit=limit, offset=offset, content_type=content_type, status=status, q=q
+            db, limit=limit, offset=offset, content_type=content_type, status=status, q=q,
+            source_mark=source_mark,
         )
     )

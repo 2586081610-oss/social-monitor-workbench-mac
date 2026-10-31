@@ -171,6 +171,7 @@ export default function PersonalSourcePage() {
   const [worksPage, setWorksPage] = useState(0);
   const [typeFilter, setTypeFilter] = useState<'' | 'video' | 'image'>('');
   const [statusFilter, setStatusFilter] = useState<'' | 'NEW' | 'DOWNLOADED' | 'DONE' | 'FAILED'>('');
+  const [sourceFilter, setSourceFilter] = useState<'' | 'like' | 'favorite'>('');
   const [titleQuery, setTitleQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
   const [worksTick, setWorksTick] = useState(0);
@@ -183,8 +184,9 @@ export default function PersonalSourcePage() {
         content_type: typeFilter || null,
         status: statusFilter || null,
         q: appliedQuery || null,
+        source_mark: sourceFilter || null,
       }),
-    [worksPage, typeFilter, statusFilter, appliedQuery, worksTick],
+    [worksPage, typeFilter, statusFilter, appliedQuery, sourceFilter, worksTick],
   );
   usePolling(worksQuery.refetch, true, 12000);
   // 联动：循环每完成一轮（last_poll 变化），立即刷新清单
@@ -407,6 +409,18 @@ export default function PersonalSourcePage() {
               {label}
             </button>
           ))}
+          {([['', '全部来源'], ['like', '点赞'], ['favorite', '收藏']] as const).map(([v, label]) => (
+            <button
+              key={v || 'all-source'}
+              type="button"
+              onClick={() => { setWorksPage(0); setSourceFilter(v); }}
+              className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                sourceFilter === v ? 'border-primary bg-primary text-white' : 'border-line text-ink hover:bg-sidebar'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
           <button
             type="button"
             onClick={() => { worksQuery.refetch(); loopQuery.refetch(); }}
@@ -431,11 +445,13 @@ export default function PersonalSourcePage() {
                 <tr>
                   <th className="w-14 px-2 py-2 font-medium">封面</th>
                   <th className="px-2 py-2 font-medium">标题</th>
+                  <th className="w-24 px-2 py-2 font-medium">作品ID</th>
+                  <th className="w-16 px-2 py-2 font-medium">来源</th>
                   <th className="w-14 px-2 py-2 font-medium">类型</th>
                   <th className="w-24 px-2 py-2 font-medium">发布时间</th>
                   <th className="w-24 px-2 py-2 font-medium">状态</th>
                   <th className="w-16 px-2 py-2 font-medium">链接</th>
-                  <th className="w-40 px-2 py-2 font-medium">媒体路径</th>
+                  <th className="w-32 px-2 py-2 font-medium">媒体路径</th>
                 </tr>
               </thead>
               <tbody>
@@ -456,6 +472,16 @@ export default function PersonalSourcePage() {
                     </td>
                     <td className="truncate px-2 py-1.5 text-ink" title={w.title ?? ''}>
                       {w.title || '（无标题）'}
+                    </td>
+                    <td className="truncate px-2 py-1.5 font-mono text-ink-muted" title={w.external_id}>
+                      {w.external_id.slice(0, 10)}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <span className="flex flex-wrap gap-1">
+                        {w.source_marks.includes('like') ? <ToneBadge tone="success" label="赞" /> : null}
+                        {w.source_marks.includes('favorite') ? <ToneBadge tone="warning" label="藏" /> : null}
+                        {w.folder_name ? <span className="text-xs text-ink-muted" title={w.folder_name}>夹</span> : null}
+                      </span>
                     </td>
                     <td className="px-2 py-1.5">
                       <ToneBadge tone={w.content_type === 'video' ? 'success' : 'warning'} label={w.content_type === 'video' ? '视频' : '图文'} />
@@ -481,8 +507,10 @@ export default function PersonalSourcePage() {
                 ))}
                 {(works?.items?.length ?? 0) === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-2 py-6 text-center text-ink-muted">
-                      没有匹配的作品
+                    <td colSpan={9} className="px-2 py-6 text-center text-ink-muted">
+                      {sourceFilter === 'favorite'
+                        ? '收藏还没有抓到：爬取已切为收藏优先，本轮数据落库后这里会自动出现'
+                        : '没有匹配的作品'}
                     </td>
                   </tr>
                 ) : null}

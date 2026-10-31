@@ -153,3 +153,38 @@ def test_personal_works_endpoint_pagination_and_filters(client, auth_headers, db
     # 标题搜索
     resp = client.get("/api/v1/personal-source/works?q=已完成", headers=auth_headers)
     assert resp.json()["data"]["total"] == 1
+
+
+def test_personal_works_source_filter_and_marks(client, auth_headers, db):
+    """来源过滤（like/favorite）与标记聚合：一作可同时带 赞+藏。"""
+    from app.models import PersonalSourceMark, Work
+
+    db.add_all([
+        Work(platform="douyin", external_id="mlike", title="只赞过", content_type="video", url="https://www.douyin.com/video/mlike", status="NEW"),
+        Work(platform="douyin", external_id="mfav", title="只藏过", content_type="image", url="https://www.douyin.com/note/mfav", status="NEW"),
+        Work(platform="douyin", external_id="mboth", title="又赞又藏", content_type="video", url="https://www.douyin.com/video/mboth", status="NEW"),
+    ])
+    db.add_all([
+        PersonalSourceMark(platform="douyin", external_id="mlike", source_mark="like", source_channel="f2", snapshot_id="snap-test"),
+        PersonalSourceMark(platform="douyin", external_id="mfav", source_mark="favorite", source_channel="f2", snapshot_id="snap-test"),
+        PersonalSourceMark(platform="douyin", external_id="mboth", source_mark="like", source_channel="f2", snapshot_id="snap-test"),
+        PersonalSourceMark(platform="douyin", external_id="mboth", source_mark="favorite", source_channel="f2", snapshot_id="snap-test",
+                           folder_name="我的宝藏夹", occurred_at="2026-01-01T00:00:00+08:00"),
+    ])
+    db.commit()
+
+    resp = client.get("/api/v1/personal-source/works?source_mark=like", headers=auth_headers)
+    data = resp.json()["data"]
+    ids = {i["external_id"] for i in data["items"]}
+    assert {"mlike", "mboth"} <= ids and "mfav" not in ids
+
+    resp = client.get("/api/v1/personal-source/works?source_mark=favorite", headers=auth_headers)
+    data = resp.json()["data"]
+    ids = {i["external_id"] for i in data["items"]}
+    assert {"mfav", "mboth"} <= ids and "mlike" not in ids
+
+    by_id = {i["external_id"]: i for i in data["items"]}
+    assert set(by_id["mboth"]["source_marks"]) == {"like", "favorite"}
+    assert by_id["mboth"]["folder_name"] == "我的宝藏夹"
+    assert by_id["mboth"]["occurred_at"].startswith("2026-01-01")
+    assert by_id["mfav"]["source_marks"] == ["favorite"]

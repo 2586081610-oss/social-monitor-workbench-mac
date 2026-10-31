@@ -465,9 +465,16 @@ def list_personal_works(
     content_type: str | None = None,
     status: str | None = None,
     q: str | None = None,
+    source_mark: str | None = None,
 ) -> dict:
-    """已抓取的个人来源作品清单（分页 + 过滤），供前端实时浏览。"""
-    from app.models import Work
+    """已抓取的个人来源作品清单（分页 + 过滤），供前端实时浏览。
+
+    source_mark 过滤来源（like=点赞 / collection=收藏）；每条作品附带其
+    全部来源标记、收藏夹名与操作时间（平台不提供时如实为 null）。
+    """
+    from sqlalchemy import func
+
+    from app.models import PersonalSourceMark, Work
 
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -478,19 +485,69 @@ def list_personal_works(
         query = query.filter(Work.status == status)
     if q:
         query = query.filter(Work.title.contains(q))
+    if source_mark:
+        marked = (
+            db.query(PersonalSourceMark.external_id)
+            .filter(
+                PersonalSourceMark.platform == "douyin",
+                PersonalSourceMark.source_mark == source_mark,
+            )
+        )
+        query = query.filter(Work.external_id.in_(marked))
     total = query.count()
     rows = query.order_by(Work.id.desc()).offset(offset).limit(limit).all()
-    items = [
-        {
-            "external_id": w.external_id,
-            "title": w.title,
-            "content_type": w.content_type,
-            "published_at": w.published_at,
-            "url": w.url,
-            "cover_url": w.cover_url,
-            "status": w.status,
-            "media_path": w.media_path,
-        }
-        for w in rows
-    ]
+    # 聚合来源标记（一作可同时点赞+收藏；数据量 ~万级，内存聚合足够）
+    marks_map: dict[str, dict] = {}
+    mrows = (
+        db.query(
+            PersonalSourceMark.external_id,
+            PersonalSourceMark.source_mark,
+            PersonalSourceMark.folder_name,
+            PersonalSourceMark.occurred_at,
+        )
+        .filter(PersonalSourceMark.platform == "douyin")
+        .all()
+    )
+    for external_id, mark, folder_name, occurred_at in mrows:
+        entry = marks_map.setdefault(external_id, {"marks": [], "folder_name": None, "occurred_at": None})
+        if mark and mark not in entry["marks"]:
+            entry["marks"].append(mark)
+        if folder_name and not entry["folder_name"]:
+            entry["folder_name"] = folder_name
+        if occurred_at and not entry["occurred_at"]:
+            entry["occurred_at"] = occurred_at
+    from app.models import PersonalSourceFolderItem
+
+    frows = (
+        db.query(
+            PersonalSourceFolderItem.external_id,
+            PersonalSourceFolderItem.folder_name,
+        )
+        .filter(PersonalSourceFolderItem.platform == "douyin")
+        .all()
+    )
+    for external_id, folder_name in frows:
+        entry = marks_map.setdefault(external_id, {"marks": [], "folder_name": None, "occurred_at": None})
+        if folder_name:
+            entry["folder_name"] = entry.get("folder_name") or folder_name
+            if "favorite" not in entry["marks"]:
+                entry["marks"].append("favorite")
+    items = []
+    for w in rows:
+        entry = marks_map.get(w.external_id, {})
+        items.append(
+            {
+                "external_id": w.external_id,
+                "title": w.title,
+                "content_type": w.content_type,
+                "published_at": w.published_at,
+                "url": w.url,
+                "cover_url": w.cover_url,
+                "status": w.status,
+                "media_path": w.media_path,
+                "source_marks": entry.get("marks") or [],
+                "folder_name": entry.get("folder_name"),
+                "occurred_at": entry.get("occurred_at"),
+            }
+        )
     return {"total": total, "limit": limit, "offset": offset, "items": items}
