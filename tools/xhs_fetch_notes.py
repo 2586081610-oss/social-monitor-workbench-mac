@@ -108,10 +108,18 @@ def main() -> int:
             )
 
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            str(PROFILE_DIR), headless=True, viewport={"width": 1280, "height": 900},
-            channel="msedge", args=["--no-proxy-server"],
-        )
+        try:
+            ctx = p.chromium.launch_persistent_context(
+                str(PROFILE_DIR), headless=True, viewport={"width": 1280, "height": 900},
+                channel="msedge", args=["--no-proxy-server"],
+            )
+        except Exception:
+            # 本机未装 Edge（如 Mac）时回退 Playwright 自带 chromium：
+            # 登录态来自 platform_cookies.json 注入，不依赖 Edge 配置
+            ctx = p.chromium.launch_persistent_context(
+                str(PROFILE_DIR), headless=True, viewport={"width": 1280, "height": 900},
+                args=["--no-proxy-server"],
+            )
         # 注入 config/platform_cookies.json 的最新 xhs cookie（优先级高于旧 profile）
         try:
             _cfg = json.loads((ROOT / "config" / "platform_cookies.json").read_text(encoding="utf-8"))
