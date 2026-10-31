@@ -22,6 +22,7 @@ export const STATUS_LABEL: Record<WorkStatus, string> = {
   NEW: '新作品',
   QUEUED: '排队中',
   DOWNLOADING: '下载中',
+  DOWNLOADED: '已下载',
   TRANSCRIBING: '转写中',
   FRAME_EXTRACTING: '抽帧中',
   NOTE_GENERATING: 'AI 笔记未完成',

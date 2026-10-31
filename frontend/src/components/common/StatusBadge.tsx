@@ -32,6 +32,7 @@ const WORK_META: Record<WorkStatus, WorkBadgeMeta> = {
   NEW: { tone: 'neutral', icon: Clock },
   QUEUED: { tone: 'info', icon: Clock },
   DOWNLOADING: { tone: 'info', icon: Loader2, spin: true },
+  DOWNLOADED: { tone: 'success', icon: CheckCircle2 },
   TRANSCRIBING: { tone: 'info', icon: Loader2, spin: true },
   FRAME_EXTRACTING: { tone: 'info', icon: Loader2, spin: true },
   // NOTE_GENERATING：当前系统无真正生成中的信号，一律不转圈；「已完成」分支见 StatusBadge 的 notePath 判断

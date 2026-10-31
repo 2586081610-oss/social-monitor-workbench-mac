@@ -20,6 +20,7 @@ const ORDER: Record<WorkStatus, number> = {
   NEW: 0,
   QUEUED: 0,
   DOWNLOADING: 1,
+  DOWNLOADED: 2,
   TRANSCRIBING: 2,
   FRAME_EXTRACTING: 3,
   NOTE_GENERATING: 4,
