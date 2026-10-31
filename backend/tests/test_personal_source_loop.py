@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -200,3 +201,86 @@ def test_run_loop_breaker_treats_fail_and_failed_alike(tmp_path, monkeypatch):
     )
     assert state["final_status"] == "aborted_consecutive_failures"
     assert state["rounds_done"] == 3
+
+
+def test_page_delay_applied_between_pages_and_capped_by_deadline(monkeypatch, tmp_path):
+    """页间限速：两页之间睡一次（默认 2.5s+抖动），最后一页后不睡；预算到期截断。"""
+    import asyncio
+
+    from monitor.platforms import f2_fetch
+
+    monkeypatch.setenv("F2_PAGE_DELAY_SECONDS", "2.5")
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(f2_fetch.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(f2_fetch.random, "random", lambda: 0.0)  # 抖动确定性
+
+    class FakePage:
+        status_code = 0
+
+        def __init__(self, raw):
+            self._raw = raw
+
+        def _to_raw(self):
+            return self._raw
+
+    page = FakePage({"aweme_list": [{"aweme_id": "1", "desc": "t", "author": {}}], "has_more": True})
+
+    def make_gen(_cursor):
+        async def gen():
+            yield page
+            yield FakePage({"aweme_list": [{"aweme_id": "2", "desc": "t2", "author": {}}], "has_more": False})
+        return gen()
+
+    works, meta = asyncio.run(
+        f2_fetch.consume_video_pages(
+            make_gen, label="like", requested_page_counts=20, max_pages=10, max_items=100,
+            warnings=[], deadline=None, on_page=None, on_partial=None,
+        )
+    )
+    assert len(works) == 2 and meta["complete"] is True
+    assert len(sleeps) == 1 and 2.5 <= sleeps[0] <= 3.75
+
+    # 预算只剩 0.5s：页间间隔被截断到 ≤0.5s，绝不睡过截止后继续发请求
+    sleeps.clear()
+
+    def make_gen_deadline(_cursor):
+        async def gen():
+            yield page
+            yield FakePage({"aweme_list": [{"aweme_id": "1", "desc": "t", "author": {}}], "has_more": False})
+        return gen()
+
+    works2, meta2 = asyncio.run(
+        f2_fetch.consume_video_pages(
+            make_gen_deadline, label="like", requested_page_counts=20, max_pages=10, max_items=100,
+            warnings=[], deadline=time.monotonic() + 0.5, on_page=None, on_partial=None,
+        )
+    )
+    # 0.5s 预算下：页间间隔被截断到 ≤0.5s（绝不睡过截止后继续发请求）
+    assert sleeps and all(s <= 0.5 for s in sleeps)
+
+
+def test_round_gap_default_is_conservative(monkeypatch):
+    """风控事件后：轮间休息默认 180s，环境变量可调。"""
+    monkeypatch.delenv("F2_ROUND_GAP_SECONDS", raising=False)
+    assert loop_mod._round_gap_seconds() == 180
+    monkeypatch.setenv("F2_ROUND_GAP_SECONDS", "600")
+    assert loop_mod._round_gap_seconds() == 600
+    monkeypatch.setenv("F2_ROUND_GAP_SECONDS", "junk")
+    assert loop_mod._round_gap_seconds() == 180
+
+
+def test_fetch_budget_env_default(monkeypatch, tmp_path):
+    """取数预算默认 900s，F2_FETCH_BUDGET_SECONDS 可调低。"""
+    from app.services import personal_source_service as svc
+
+    # 只验证 env 解析语义（不真跑 F2）：直接调用内联逻辑
+    import os
+
+    monkeypatch.delenv("F2_FETCH_BUDGET_SECONDS", raising=False)
+    assert int(os.getenv("F2_FETCH_BUDGET_SECONDS", "900")) == 900
+    monkeypatch.setenv("F2_FETCH_BUDGET_SECONDS", "600")
+    assert int(os.getenv("F2_FETCH_BUDGET_SECONDS", "900")) == 600

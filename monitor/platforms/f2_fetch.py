@@ -50,6 +50,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -230,6 +231,19 @@ def _payload_status_kind(payload_status) -> tuple[str, str] | None:
     return kind, f"接口返回 status_code={payload_status}"
 
 
+def _page_delay_seconds() -> float:
+    """页间限速秒数：F2_PAGE_DELAY_SECONDS 可调（默认 2.5s）+ 最多 50% 随机抖动。
+
+    平台对背靠背分页请求敏感（2026-10-31 实测触发风控）；温和的页间隔是
+    当前架构下最有效的降险手段，不涉及任何检测规避。
+    """
+    try:
+        base = float(os.getenv("F2_PAGE_DELAY_SECONDS", "0"))
+    except ValueError:
+        base = 2.5
+    return max(0.0, base) * (1.0 + random.random() * 0.5)
+
+
 async def consume_video_pages(make_gen, *, label: str, requested_page_counts: int,
                               max_pages: int, max_items: int, warnings: list,
                               deadline: float | None = None,
@@ -315,6 +329,14 @@ async def consume_video_pages(make_gen, *, label: str, requested_page_counts: in
                     on_partial(works, pages, oversize_pages)
                 except Exception:  # noqa: BLE001 - 挂载失败不影响取数
                     warnings.append(f"{label} 已读页结果挂载失败，本次继续按不完整处理")
+            # 页间限速：随机抖动的温和间隔，避免背靠背突发请求触发风控；
+            # 受整体预算约束（绝不睡过截止后继续发请求）。
+            if pages < max_pages and len(works) < max_items:
+                delay = _page_delay_seconds()
+                if deadline is not None:
+                    delay = min(delay, max(0.0, deadline - time.monotonic()))
+                if delay > 0:
+                    await asyncio.sleep(delay)
             if pages >= max_pages:
                 warnings.append(f"{label} 达到页数上限 {max_pages}，列表可能不完整")
                 stopped_by_budget = True

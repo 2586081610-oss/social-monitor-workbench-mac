@@ -436,7 +436,7 @@ def read_snapshot_f2(
     scopes: tuple[str, ...] = SCOPES_ALL,
     sec_user_id: str = "",
     folder_ids: tuple[str, ...] = (),
-    budget_seconds: int = 900,
+    budget_seconds: int | None = None,
     page_counts: int = 20,
     progress_file: str | os.PathLike | None = None,
 ) -> PersonalSnapshot:
@@ -447,6 +447,13 @@ def read_snapshot_f2(
     取数在 f2_sync_lock 内执行：并发调用方立即 already_running 且不触碰进度
     状态；run_ingest 持同一把锁覆盖到数据库提交与游标确认（重入直接放行）。
     """
+    if budget_seconds is None:
+        # 每轮取数预算：F2_FETCH_BUDGET_SECONDS 可调；风控事件后建议调小
+        # 以降低单轮突发请求量（默认仍为 900s）。
+        try:
+            budget_seconds = int(os.getenv("F2_FETCH_BUDGET_SECONDS", "900"))
+        except ValueError:
+            budget_seconds = 900
     cookie_path = resolve_cookie_file(cookie_file)
     if not cookie_path.is_file():
         raise PersonalSourceError(

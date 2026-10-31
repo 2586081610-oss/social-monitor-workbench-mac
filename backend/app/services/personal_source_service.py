@@ -290,9 +290,14 @@ def trigger_manual_sync() -> dict:
     cmd = [sys.executable, "-m", "monitor.personal_source_ingest", "--source", "f2", "--download"]
     from monitor.platforms.douyin_personal_source import redact_sensitive_text
 
+    sync_env = dict(
+        os.environ,
+        F2_PAGE_DELAY_SECONDS=os.getenv("F2_PAGE_DELAY_SECONDS", "2.5"),
+    )
     proc = subprocess.Popen(
         cmd,
         cwd=str(settings.workspace_root),
+        env=sync_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -396,9 +401,15 @@ def start_sync_loop(max_rounds: int = 60) -> dict:
     f2_dir.mkdir(parents=True, exist_ok=True)
     log_file = open(f2_dir / "loop.log", "ab")  # noqa: SIM115 - 循环期间持续追加
     try:
+        loop_env = dict(
+            os.environ,
+            F2_PAGE_DELAY_SECONDS=os.getenv("F2_PAGE_DELAY_SECONDS", "2.5"),
+            F2_ROUND_GAP_SECONDS=os.getenv("F2_ROUND_GAP_SECONDS", "180"),
+        )
         proc = subprocess.Popen(  # noqa: S603 - 固定模块名与整数参数
             [sys.executable, "-m", "monitor.personal_source_loop", "--max-rounds", str(int(max_rounds))],
             cwd=str(settings.workspace_root),
+            env=loop_env,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,

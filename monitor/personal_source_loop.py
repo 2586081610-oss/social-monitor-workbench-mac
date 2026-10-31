@@ -25,7 +25,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 INGEST_TIMEOUT_SECONDS = 2100
-ROUND_GAP_SECONDS = 30
+def _round_gap_seconds() -> int:
+    """轮间休息秒数：F2_ROUND_GAP_SECONDS 可调；风控事件后建议拉长。"""
+    try:
+        return max(0, int(os.getenv("F2_ROUND_GAP_SECONDS", "180")))
+    except ValueError:
+        return 180
 MAX_CONSECUTIVE_FAILURES = 3
 _TZ = timezone(timedelta(hours=8))
 
@@ -132,7 +137,7 @@ def run_loop(
             log("3 consecutive failed rounds, aborting")
             break
         if round_no < max_rounds:
-            time.sleep(ROUND_GAP_SECONDS)
+            time.sleep(_round_gap_seconds())
 
     state = read_state(f2_dir)
     state.update(
