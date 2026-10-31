@@ -1,17 +1,39 @@
 /** P8 设置：cookie 状态 + 重新扫码引导 + 自动刷新爬取 + 轮询间隔配置 + API 连接 + 系统健康 + 公众号占位。 */
 import { useState } from 'react';
-import { KeyRound, RefreshCw, Settings2 } from 'lucide-react';
+import { KeyRound, RefreshCw, Settings2, UserCog } from 'lucide-react';
 import { CookieStatusBadge, ToneBadge } from '../components/common/StatusBadge';
 import { ErrorState, LoadingState } from '../components/common/StateViews';
 import Toggle from '../components/common/Toggle';
-import { getCookieHealth, getSystemHealth, pingHealth } from '../services/health';
+import {
+  checkAllCookieHealth,
+  checkCookieHealth,
+  getCookieHealth,
+  getSystemHealth,
+  pingHealth,
+  switchAccountCookie,
+} from '../services/health';
 import { getArchivePolicy } from '../services/archive';
 import { useAsyncData, usePolling } from '../hooks/useApi';
 import { useRelogin } from '../state/relogin';
 import { API_BASE_URL, getToken, setToken } from '../config/api';
 import { readAggSettings, setAutoRefresh, setAutoRefreshMinutes } from '../utils/aggSettings';
-import { PLATFORM_LABEL, POLL_INTERVAL_INFO, SYSTEM_COMPONENT_LABEL, SYSTEM_COMPONENT_STATUS } from '../utils/constants';
+import {
+  COOKIE_STATUS_LABEL,
+  PLATFORM_LABEL,
+  POLL_INTERVAL_INFO,
+  SYSTEM_COMPONENT_LABEL,
+  SYSTEM_COMPONENT_STATUS,
+} from '../utils/constants';
 import { formatDateTime } from '../utils/format';
+import type { CookieHealth } from '../types/api.d';
+
+/** 各平台 Cookie 导出指引（切换账号弹窗展示）。 */
+const COOKIE_HINTS: Record<string, string> = {
+  douyin: '登录 douyin.com 后：F12 → 网络(Network) → 刷新页面 → 点第一个 www.douyin.com 请求 → 请求标头 → 复制整段 Cookie（需包含 sessionid）。',
+  bilibili: '登录 bilibili.com 后：F12 → 网络 → 复制任意 api.bilibili.com 请求的整段 Cookie（需包含 SESSDATA）。',
+  xhs: '登录 xiaohongshu.com 后：F12 → 网络 → 复制任意请求的整段 Cookie（需包含 web_session）。',
+  twitter: '登录 x.com 后：F12 → 网络 → 复制任意请求的整段 Cookie（需包含 auth_token；在线检测需要代理可达）。',
+};
 
 const SYSTEM_TONE: Record<string, 'success' | 'danger' | 'warning' | 'neutral'> = {
   online: 'success',
@@ -89,6 +111,67 @@ export default function SettingsPage() {
 
   const intervalLabel =
     autoMinutes >= 60 && autoMinutes % 60 === 0 ? `${autoMinutes / 60} 小时` : `${autoMinutes} 分钟`;
+
+  // 账号健康：立即检测 / 一键检测 / 切换账号
+  const [checkingAll, setCheckingAll] = useState(false);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [switchTarget, setSwitchTarget] = useState<string | null>(null);
+  const [switchInput, setSwitchInput] = useState('');
+  const [switchBusy, setSwitchBusy] = useState(false);
+  const [switchResult, setSwitchResult] = useState<CookieHealth | null>(null);
+  const [switchMsg, setSwitchMsg] = useState<string | null>(null);
+
+  const handleCheckPlatform = async (platform: string) => {
+    setChecking(platform);
+    try {
+      await checkCookieHealth(platform);
+    } catch {
+      // 校验失败也以列表最新数据为准
+    } finally {
+      setChecking(null);
+      await cookieQuery.refetch();
+    }
+  };
+
+  const handleCheckAll = async () => {
+    setCheckingAll(true);
+    try {
+      await checkAllCookieHealth();
+    } catch {
+      // 同上
+    } finally {
+      setCheckingAll(false);
+      await cookieQuery.refetch();
+    }
+  };
+
+  const openSwitch = (platform: string) => {
+    setSwitchTarget(platform);
+    setSwitchInput('');
+    setSwitchResult(null);
+    setSwitchMsg(null);
+  };
+
+  const handleSwitchSave = async () => {
+    if (!switchTarget) return;
+    const cookie = switchInput.trim();
+    if (cookie.length < 20) {
+      setSwitchMsg('Cookie 内容太短（至少 20 字符），请确认复制的是整段请求 Cookie。');
+      return;
+    }
+    setSwitchBusy(true);
+    setSwitchMsg(null);
+    setSwitchResult(null);
+    try {
+      const result = await switchAccountCookie(switchTarget, cookie);
+      setSwitchResult(result);
+      await cookieQuery.refetch();
+    } catch (e) {
+      setSwitchMsg(e instanceof Error ? `切换失败：${e.message}` : '切换失败，请稍后重试');
+    } finally {
+      setSwitchBusy(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -179,23 +262,35 @@ export default function SettingsPage() {
         )}
       </Section>
 
-      {/* 凭据健康度 */}
-      <Section title="凭据健康度" desc="各平台 cookie / CDP 会话状态；失效不静默，可引导重新登录。">
+      {/* 凭据健康度（账号健康）：真校验 + 账号切换 */}
+      <Section title="账号健康（四平台登录态）" desc="已登录 / 未登录由在线校验实时判定，探测不到的如实显示，不编造。">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <p className="text-xs text-ink-muted">检测使用各平台轻量接口，不会发帖、点赞或改动账号。</p>
+          <button
+            type="button"
+            onClick={handleCheckAll}
+            disabled={checkingAll || checking !== null}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs text-ink-secondary transition-colors hover:bg-sidebar disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${checkingAll ? 'animate-spin' : ''}`} />
+            {checkingAll ? '检测中…' : '一键检测全部'}
+          </button>
+        </div>
         {cookieQuery.loading ? (
-          <LoadingState label="加载凭据状态…" />
+          <LoadingState label="加载账号状态…" />
         ) : cookieQuery.error ? (
           <ErrorState message={cookieQuery.error.message} onRetry={cookieQuery.refetch} />
         ) : cookies.length === 0 ? (
-          <p className="text-xs text-ink-muted">暂无凭据健康数据。</p>
+          <p className="text-xs text-ink-muted">暂无账号健康数据。</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-left text-sm">
+            <table className="w-full min-w-[640px] text-left text-sm">
               <thead>
                 <tr className="border-b border-line text-xs uppercase tracking-widest text-ink-muted">
                   <th className="px-3 py-2 font-semibold">平台</th>
-                  <th className="px-3 py-2 font-semibold">状态</th>
+                  <th className="px-3 py-2 font-semibold">登录状态</th>
                   <th className="px-3 py-2 font-semibold">最近检查</th>
-                  <th className="px-3 py-2 font-semibold">备注</th>
+                  <th className="px-3 py-2 font-semibold">校验详情</th>
                   <th className="px-3 py-2 text-right font-semibold">操作</th>
                 </tr>
               </thead>
@@ -207,17 +302,33 @@ export default function SettingsPage() {
                     <td className="px-3 py-2.5 text-xs text-ink-muted">{formatDateTime(c.last_checked_at)}</td>
                     <td className="px-3 py-2.5 text-xs text-ink-secondary">{c.note ?? '—'}</td>
                     <td className="px-3 py-2.5 text-right">
-                      {c.status === 'NEEDS_RELOGIN' ? (
+                      <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
-                          onClick={() => open(c.platform)}
-                          className="rounded-md border border-danger/40 px-2 py-1 text-xs text-danger transition-colors hover:bg-danger hover:text-white"
+                          onClick={() => handleCheckPlatform(c.platform)}
+                          disabled={checking !== null || checkingAll}
+                          className="rounded-md border border-line px-2 py-1 text-xs text-ink-secondary transition-colors hover:bg-sidebar disabled:opacity-50"
                         >
-                          重新登录
+                          {checking === c.platform ? '检测中…' : '立即检测'}
                         </button>
-                      ) : (
-                        <span className="text-xs text-ink-muted">—</span>
-                      )}
+                        <button
+                          type="button"
+                          onClick={() => openSwitch(c.platform)}
+                          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-ink-secondary transition-colors hover:bg-sidebar"
+                        >
+                          <UserCog className="h-3 w-3" />
+                          切换账号
+                        </button>
+                        {c.status === 'NEEDS_RELOGIN' ? (
+                          <button
+                            type="button"
+                            onClick={() => open(c.platform)}
+                            className="rounded-md border border-danger/40 px-2 py-1 text-xs text-danger transition-colors hover:bg-danger hover:text-white"
+                          >
+                            重新登录
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -225,6 +336,9 @@ export default function SettingsPage() {
             </table>
           </div>
         )}
+        <p className="mt-2 text-[11px] text-ink-muted">
+          状态说明：{COOKIE_STATUS_LABEL.OK}＝在线校验通过；{COOKIE_STATUS_LABEL.WARN}＝有会话凭证但网络未打通；{COOKIE_STATUS_LABEL.NEEDS_RELOGIN}＝未登录或凭证失效；{COOKIE_STATUS_LABEL.UNKNOWN}＝响应异常无法判定。
+        </p>
       </Section>
 
       {/* 系统健康 */}
@@ -319,6 +433,60 @@ export default function SettingsPage() {
           公众号导入（预留，暂不可用）
         </button>
       </Section>
+
+      {/* 切换账号弹窗：粘贴 Cookie → 保存落盘 → 立即校验 */}
+      {switchTarget ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => {
+            if (!switchBusy) setSwitchTarget(null);
+          }}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-xl overflow-auto rounded-lg border border-line bg-surface p-4 shadow-card"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold text-ink">切换账号 · {PLATFORM_LABEL[switchTarget] ?? switchTarget}</h2>
+            <p className="mt-1.5 text-xs leading-5 text-ink-muted">{COOKIE_HINTS[switchTarget] ?? ''}</p>
+            <textarea
+              value={switchInput}
+              onChange={(e) => setSwitchInput(e.target.value)}
+              rows={5}
+              placeholder="粘贴整段 Cookie（Cookie: 后面的完整内容）…"
+              className="mt-3 w-full rounded-md border border-line px-3 py-2 font-mono text-xs text-ink focus:border-primary focus:outline-none"
+            />
+            {switchResult ? (
+              <div className="mt-2 flex items-center gap-2 text-sm">
+                <span className="text-ink-secondary">校验结果：</span>
+                <CookieStatusBadge status={switchResult.status} />
+                <span className="text-xs text-ink-muted">{switchResult.note ?? ''}</span>
+              </div>
+            ) : null}
+            {switchMsg ? <p className="mt-2 text-sm text-danger">{switchMsg}</p> : null}
+            <p className="mt-2 text-[11px] text-ink-muted">
+              保存后立即在线校验；原 Cookie 会被覆盖，下载与采集管道将改用新账号。
+            </p>
+            <div className="mt-3 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setSwitchTarget(null)}
+                disabled={switchBusy}
+                className="rounded-md border border-line px-3 py-1.5 text-sm text-ink-secondary disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleSwitchSave}
+                disabled={switchBusy || switchInput.trim().length < 20}
+                className="rounded-md bg-primary px-3 py-1.5 text-sm text-white transition-colors hover:bg-primary-hover disabled:opacity-50"
+              >
+                {switchBusy ? '保存并校验中…' : '保存并立即校验'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

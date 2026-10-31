@@ -90,8 +90,10 @@ def init_db(*, db_engine=None, session_factory=None, create_dirs: bool = True) -
         _ensure_column(conn, "works", "download_claim_pid", "INTEGER")
 
     with session_factory() as db:
-        from app.repositories.health_repo import upsert_cookie
+        from app.repositories.health_repo import get_cookie, upsert_cookie
 
         for platform in _COOKIE_PLATFORMS:
-            upsert_cookie(db, platform=platform, status="UNKNOWN", note=None)
+            # 仅补缺失行：重启不得清空已判定的登录态（OK/WARN/NEEDS_RELOGIN 是校验结果，不是启动状态）
+            if get_cookie(db, platform) is None:
+                upsert_cookie(db, platform=platform, status="UNKNOWN", note=None)
         db.commit()

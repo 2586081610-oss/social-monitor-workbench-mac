@@ -40,11 +40,12 @@ export const RUNNING_STATUSES: ReadonlySet<WorkStatus> = new Set<WorkStatus>([
   'NOTE_GENERATING',
 ]);
 
+/** 账号健康状态文案：已登录/未登录必须明确（用户要求）。 */
 export const COOKIE_STATUS_LABEL: Record<string, string> = {
-  OK: '正常',
-  WARN: '警告',
-  NEEDS_RELOGIN: '需重新登录',
-  UNKNOWN: '未知',
+  OK: '已登录',
+  WARN: '疑似有效·网络校验未完成',
+  NEEDS_RELOGIN: '未登录',
+  UNKNOWN: '未校验',
 };
 
 export const SYSTEM_COMPONENT_LABEL: Record<string, string> = {
