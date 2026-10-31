@@ -118,6 +118,9 @@ class PersonalSnapshot:
     # F2 提交协议：取数结果回传的续传状态（仅哈希身份/游标/完成标记）。
     # 业务数据持久提交后才允许据此推进/清除游标；None 表示无可确认状态。
     resume_state: dict | None = None
+    # F2 回执续传状态异常：missing=应有而缺失（未声明禁用）、invalid_type=键存在但非对象。
+    # 非 None 时 ingest 必须如实上报并保留旧游标，绝不静默跳过确认。
+    resume_anomaly: str | None = None
 
 
 def _clean_str(value) -> str | None:

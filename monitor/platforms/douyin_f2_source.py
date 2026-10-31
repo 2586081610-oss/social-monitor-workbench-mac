@@ -333,7 +333,18 @@ def parse_f2_result(
     # 提交协议：取数进程不写进度文件，回传的续传状态由父进程在业务数据
     # 持久提交后经 confirm_f2_progress 确认落盘/清除（形状校验在确认步做）。
     resume = result.get("resume")
-    snapshot.resume_state = resume if isinstance(resume, dict) else None
+    if isinstance(resume, dict):
+        # {} 空对象也算 dict，形状校验交给 confirm_f2_progress 的写校验失败路径。
+        snapshot.resume_state = resume
+        snapshot.resume_anomaly = None
+    elif result.get("resume_disabled") is True:
+        # 未配置进度文件时的合法禁用：回执缺失是预期行为，无需确认。
+        snapshot.resume_state = None
+        snapshot.resume_anomaly = None
+    else:
+        # 应有而缺失或类型异常：交给 ingest 如实上报，绝不静默跳过确认。
+        snapshot.resume_state = None
+        snapshot.resume_anomaly = "missing" if "resume" not in result else "invalid_type"
     snapshot.snapshot_id = _snapshot_id(snapshot.items, snapshot.folder_memberships)
     return snapshot
 

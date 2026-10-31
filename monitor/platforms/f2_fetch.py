@@ -901,6 +901,9 @@ async def run_scopes(args: argparse.Namespace, *, progress: dict | None = None,
             "all_complete": False,
             "scopes": progress_state,
         }
+    else:
+        # 显式声明刻意禁用续传，父进程据此区分合法缺失与协议异常。
+        result["resume_disabled"] = True
 
     async def fetch_one(label: str, scope: str, make_gen, *, on_page=None) -> None:
         def _attach_partial(works, pages, oversize_pages) -> None:

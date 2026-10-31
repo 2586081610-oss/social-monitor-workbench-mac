@@ -448,7 +448,14 @@ def run_ingest(
                 # 确认失败（写入/替换/清理的 OSError）必须如实上报——数据库
                 # 可能已提交：保留已入库事实与旧确认状态，下一轮从已确认游标
                 # 幂等重放；文件系统恢复后确认成功即可重新开始新一轮。
-                if getattr(snapshot, "resume_state", None) is not None \
+                anomaly = getattr(snapshot, "resume_anomaly", None)
+                if anomaly:
+                    # 回执续传状态缺失/类型异常：绝不调用 confirm_f2_progress，
+                    # 旧续传状态不能被碰，如实上报后下一轮从旧游标重放。
+                    confirm_failure = (
+                        "resume_missing_or_invalid: 取数回执的续传状态缺失或类型异常"
+                        f"（{anomaly}），已提交数据保全，保留旧续传状态，下一轮从旧游标重放")
+                elif getattr(snapshot, "resume_state", None) is not None \
                         and not confirm_f2_progress(snapshot):
                     confirm_failure = (
                         "resume_confirm_failed: 进度确认未写入或清理成功，"
