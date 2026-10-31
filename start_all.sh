@@ -41,6 +41,12 @@ fi
 PATH="$ROOT/tools/bin:$NODE_DIR/bin:$PATH"
 export PATH
 
+# ---- 自建 RSSHub（K4）：默认指向本机 1200 端口，用户显式导出的值优先 ----
+if [ -z "${RSSHUB_BASE_URL:-}" ]; then
+  RSSHUB_BASE_URL="http://127.0.0.1:1200"
+fi
+export RSSHUB_BASE_URL
+
 # ---- 内置下载器路径（tools/ 自带；用户显式导出的值优先，仅补缺失） ----
 # douyin=jiji262 下载器（480p 档位）；mediacrawler=多平台兜底下载器。
 if [ -z "${DOUYIN_DOWNLOADER_DIR:-}" ] && [ -d "$ROOT/tools/douyin-downloader" ]; then

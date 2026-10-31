@@ -23,6 +23,12 @@ PYTHON="$ROOT/.venv/bin/python"
 [ -x "$PYTHON" ] || { echo "[ERROR] 缺少 $PYTHON"; exit 1; }
 PATH="$ROOT/tools/bin:$NODE_DIR/bin:$PATH"; export PATH
 
+# ---- 自建 RSSHub（K4）：默认指向本机 1200 端口，用户显式导出的值优先 ----
+if [ -z "${RSSHUB_BASE_URL:-}" ]; then
+  RSSHUB_BASE_URL="http://127.0.0.1:1200"
+fi
+export RSSHUB_BASE_URL
+
 if [ "$SANDBOX" = "1" ]; then
   SB="$ROOT/.sandbox"
   mkdir -p "$SB/media" "$SB/obsidian" "$SB/workbuddy" "$SB/fitness"

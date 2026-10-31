@@ -402,6 +402,60 @@ def download_via_mediacrawler(platform: str, target: str, out_dir: Path) -> str:
 
 _TWITTER_ANONYMOUS_MIN_BYTES = 100_000
 
+_TWITTER_STATUS_RE = re.compile(r"(?:status(?:es)?/)(\d{15,20})")
+_TWITTER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
+
+def _syndication_tweet(tweet_id: str) -> dict | None:
+    """匿名拉取推文公开摘要（syndication tweet-result）；失败/非 JSON 返回 None。"""
+    try:
+        response = httpx.get(
+            f"https://cdn.syndication.twimg.com/tweet-result?id={tweet_id}&token=x&lang=zh",
+            headers={"User-Agent": _TWITTER_UA},
+            timeout=10.0,
+        )
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _download_twitter_images(media_dir: Path, tweet_id: str, photos: list) -> bool:
+    """图文推文（无视频有图）：按 syndication photos 的原图直链逐张下载。
+
+    name=orig 取原始分辨率；全部失败返回 False（调用方如实报错），部分成功
+    也算成功（与视频通道的单文件语义一致，已落盘文件不回滚）。
+    """
+    media_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for idx, photo in enumerate(photos, start=1):
+        raw = str((photo or {}).get("url") or "").strip()
+        if not raw:
+            continue
+        original = raw + ("&" if "?" in raw else "?") + "name=orig"
+        suffix = ".jpg"
+        path_part = urlsplit(raw).path
+        if path_part.lower().endswith((".png", ".webp", ".gif")):
+            suffix = path_part[path_part.lower().rfind("."):]
+        try:
+            response = httpx.get(original, headers={"User-Agent": _TWITTER_UA}, timeout=30.0, follow_redirects=True)
+        except httpx.HTTPError:
+            continue
+        if response.status_code != 200 or not response.content:
+            continue
+        try:
+            (media_dir / f"tweet_photo_{idx:02d}{suffix}").write_bytes(response.content)
+            saved += 1
+        except OSError:
+            continue
+    return saved > 0
+
+
 def _download_twitter_video_anonymous(media_dir: Path, tweet_url: str, proxy: str | None) -> bool:
     """syndication 匿名视频通道：公开推文的 mp4 直链直接取文件，成功返回 True。
 
@@ -527,6 +581,21 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
         # 代理：用户显式 TWITTER_PROXY 优先，其次标准环境变量/macOS 系统设置（只读，
         # 不硬编码端口）；解析不到则直连。仅推特子进程使用，不改动全局代理。
         proxy = resolve_platform_proxy("TWITTER_PROXY")
+
+        # 媒体构成判别（匿名 syndication）：图文推文走图片通道，纯文字如实报错；
+        # syndication 不可达时保持既有视频通道行为（匿名→yt-dlp）不劣化。
+        status_match = _TWITTER_STATUS_RE.search(url)
+        tweet = _syndication_tweet(status_match.group(1)) if status_match else None
+        if isinstance(tweet, dict):
+            photos = tweet.get("photos") or []
+            videos = tweet.get("videos") or []
+            if not videos and photos:
+                if _download_twitter_images(media_dir, status_match.group(1), photos):
+                    return
+                raise PipelineOfflineError("推特图文下载失败（图片下载未成功）")
+            if not videos and not photos:
+                raise PipelineOfflineError("推文为纯文字（无视频/图片），无可下载媒体")
+
         if not cookies_file:
             # 匿名基础路径：syndication 对公开推文提供 video.twimg.com 的 mp4 直链，
             # 无需登录即可取文件（与"不打开网页播放"原则一致）；探测失败再走
