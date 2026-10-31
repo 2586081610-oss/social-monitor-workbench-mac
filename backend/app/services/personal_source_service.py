@@ -506,7 +506,15 @@ def list_personal_works(
         )
         query = query.filter(Work.external_id.in_(marked))
     total = query.count()
-    rows = query.order_by(Work.id.desc()).offset(offset).limit(limit).all()
+    # 发布时间倒序（与表格「发布时间」列一致）；无发布时间的排最后，
+    # 同秒作品按入库先后兜底。published_at 为统一 ISO-8601 UTC 文本，字典序即时间序。
+    rows = (
+        query
+        .order_by(Work.published_at.is_(None), Work.published_at.desc(), Work.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     # 聚合来源标记（一作可同时点赞+收藏；数据量 ~万级，内存聚合足够）
     marks_map: dict[str, dict] = {}
     mrows = (

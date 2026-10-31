@@ -27,6 +27,20 @@ const SCOPE_OPTIONS: { value: PersonalScope; label: string }[] = [
   { value: 'collections', label: '收藏夹及夹内作品' },
 ];
 
+/** 作品状态中文短标签（状态列窄，英文枚举放不下且不直观）。 */
+const STATUS_LABELS: Record<string, string> = {
+  QUEUED: '排队中',
+  DOWNLOADING: '下载中',
+  DOWNLOADED: '已下载',
+  TRANSCRIBING: '转写中',
+  FRAME_EXTRACTING: '抽帧中',
+  NOTE_GENERATING: '待笔记',
+  DONE: '完成',
+  FAILED: '失败',
+  NEW: '新作品',
+  UNCLASSIFIED: '未分组',
+};
+
 const INTERVAL_OPTIONS = [
   { label: '每 1 小时', minutes: 60 },
   { label: '每 6 小时', minutes: 360 },
@@ -209,7 +223,7 @@ export default function PersonalSourcePage() {
   const lastPartial = lastSync?.status === 'partial';
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-4">
+    <div className="mx-auto max-w-4xl space-y-4 p-4">
       <header className="flex items-center gap-2">
         <Heart className="h-5 w-5 text-primary" />
         <h1 className="text-base font-semibold text-ink">个人来源（抖音 · F2 通道）</h1>
@@ -443,15 +457,15 @@ export default function PersonalSourcePage() {
             <table className="w-full table-fixed text-left text-xs">
               <thead className="bg-sidebar text-ink-muted">
                 <tr>
-                  <th className="w-14 px-2 py-2 font-medium">封面</th>
+                  <th className="w-12 px-2 py-2 font-medium">封面</th>
                   <th className="px-2 py-2 font-medium">标题</th>
-                  <th className="w-24 px-2 py-2 font-medium">作品ID</th>
-                  <th className="w-16 px-2 py-2 font-medium">来源</th>
-                  <th className="w-14 px-2 py-2 font-medium">类型</th>
+                  <th className="w-20 px-2 py-2 font-medium">作品ID</th>
+                  <th className="w-14 px-2 py-2 font-medium">来源</th>
+                  <th className="w-20 px-2 py-2 font-medium">类型</th>
                   <th className="w-24 px-2 py-2 font-medium">发布时间</th>
                   <th className="w-24 px-2 py-2 font-medium">状态</th>
-                  <th className="w-16 px-2 py-2 font-medium">链接</th>
-                  <th className="w-32 px-2 py-2 font-medium">媒体路径</th>
+                  <th className="w-12 px-2 py-2 font-medium">链接</th>
+                  <th className="w-24 px-2 py-2 font-medium">媒体路径</th>
                 </tr>
               </thead>
               <tbody>
@@ -490,7 +504,7 @@ export default function PersonalSourcePage() {
                     <td className="px-2 py-1.5">
                       <ToneBadge
                         tone={w.status === 'DOWNLOADED' || w.status === 'DONE' ? 'success' : w.status === 'FAILED' ? 'danger' : 'neutral'}
-                        label={w.status || '—'}
+                        label={STATUS_LABELS[w.status ?? ''] ?? w.status ?? '—'}
                       />
                     </td>
                     <td className="px-2 py-1.5">
