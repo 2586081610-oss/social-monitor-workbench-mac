@@ -107,6 +107,7 @@ class Settings:
         # 监控层调度
         self.poll_rsshub_interval: int = int(os.getenv("POLL_RSSHUB_INTERVAL", "300"))
         self.poll_douyin_interval: int = int(os.getenv("POLL_DOUYIN_INTERVAL", "600"))
+        self.poll_xhs_interval: int = int(os.getenv("POLL_XHS_INTERVAL", "600"))
         self.poll_trigger_interval: int = int(os.getenv("POLL_TRIGGER_INTERVAL", "10"))
         self.heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", "15"))
         # 个人来源（F2 通道）定时同步：任务本身每 tick 检查 app_settings 开关，

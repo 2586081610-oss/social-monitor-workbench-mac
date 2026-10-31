@@ -51,7 +51,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 refuse_running_record monitor
 
-echo "[提示] 将启动的轮询: RSSHub(bilibili/twitter) 每 ${POLL_RSSHUB_INTERVAL:-300}s、抖音每 ${POLL_DOUYIN_INTERVAL:-600}s、trigger 每 ${POLL_TRIGGER_INTERVAL:-10}s；流水线 MONITOR_RUN_PIPELINE=${MONITOR_RUN_PIPELINE:-false}"
+echo "[提示] 将启动的轮询: RSSHub(bilibili/twitter) 每 ${POLL_RSSHUB_INTERVAL:-300}s、抖音每 ${POLL_DOUYIN_INTERVAL:-600}s、小红书每 ${POLL_XHS_INTERVAL:-600}s、trigger 每 ${POLL_TRIGGER_INTERVAL:-10}s；流水线 MONITOR_RUN_PIPELINE=${MONITOR_RUN_PIPELINE:-false}"
 nohup "$PYTHON" "$ROOT/monitor/main.py" > "$ROOT/.run/logs/monitor.log" 2>&1 &
 echo $! > "$ROOT/.run/monitor.pid"
 monitor_started=1

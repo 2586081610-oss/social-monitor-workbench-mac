@@ -70,6 +70,14 @@ def build_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
+    # 小红书博主轮询：Playwright 拦截 user_posted API（POLL_XHS_INTERVAL 可调）
+    scheduler.add_job(
+        jobs.poll_xhs,
+        IntervalTrigger(seconds=settings.poll_xhs_interval),
+        id="poll_xhs",
+        max_instances=1,
+        coalesce=True,
+    )
     # 个人来源定时同步（F2）：任务内部读 app_settings 开关，默认关闭不会隐式启动
     scheduler.add_job(
         jobs.check_douyin_personal_sync,
