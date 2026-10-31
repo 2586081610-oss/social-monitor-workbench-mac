@@ -45,7 +45,7 @@ _BILIBILI_ID = re.compile(r"/video/(BV[0-9A-Za-z]+)", re.I)
 _DOUYIN_ID = re.compile(r"/video/(\d+)")
 _XHS_ID = re.compile(r"/(?:explore|discovery/item)/([0-9a-zA-Z]+)")
 _TWITTER_ID = re.compile(r"/status/(\d+)")
-_SHORT_LINK_HOSTS = {"b23.tv", "v.douyin.com", "xhslink.com", "xhslink.cn", "t.co"}
+_SHORT_LINK_HOSTS = {"b23.tv", "v.douyin.com", "iesdouyin.com", "xhslink.com", "xhslink.cn", "t.co"}
 
 
 def _resolve_short_link(url: str) -> str:
@@ -131,7 +131,7 @@ def parse_link_identity(
         match = _BILIBILI_ID.search(path)
         if match:
             return LinkIdentity("bilibili", match.group(1))
-    elif host == "douyin.com" or host.endswith(".douyin.com"):
+    elif host == "douyin.com" or host.endswith(".douyin.com") or host.endswith(".iesdouyin.com"):
         match = _DOUYIN_ID.search(path)
         if match:
             return LinkIdentity("douyin", match.group(1))

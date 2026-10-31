@@ -98,6 +98,8 @@ def test_rejects_url_that_does_not_match_supplied_platform(client, auth_headers)
         ("https://www.douyin.com/video/7412345678901234567", "douyin", "7412345678901234567"),
         ("https://www.xiaohongshu.com/explore/673adb17000000001d037a1f", "xhs", "673adb17000000001d037a1f"),
         ("https://x.com/example/status/1234567890123456789", "twitter", "1234567890123456789"),
+        # 抖音分享中转域 iesdouyin（v.douyin.com 302 的第一跳，2026-10-31 真实链路发现）
+        ("https://www.iesdouyin.com/share/video/7702476660506938658/?region=CN", "douyin", "7702476660506938658"),
     ],
 )
 def test_parse_link_identity_recognizes_remaining_supported_video_hosts(url, platform, external_id):
