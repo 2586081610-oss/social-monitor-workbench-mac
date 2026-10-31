@@ -54,3 +54,28 @@ def put_schedule(payload: ScheduleConfig, db: Session = Depends(get_db)):
 def post_sync():
     """手动同步一次（立即返回，结果经 /status 查询）。"""
     return ok(personal_source_service.trigger_manual_sync())
+
+
+class SyncLoopStart(BaseModel):
+    max_rounds: int = Field(default=60, ge=1, le=200, description="最大轮数；每轮预算 900s 自动熔断")
+
+
+@router.post("/sync-loop", status_code=200)
+def post_sync_loop(payload: SyncLoopStart):
+    """启动"连续同步到完整"循环：只读列表元数据，绝不下载。
+
+    每轮复用预算机制；停止条件：用户停止 / 全部范围完整 / 连续 3 轮失败 / 达到轮数。
+    """
+    return ok(personal_source_service.start_sync_loop(payload.max_rounds))
+
+
+@router.post("/sync-loop/stop", status_code=200)
+def post_sync_loop_stop():
+    """请求停止连续同步（当前轮结束后安全退出，不中断进行中的轮）。"""
+    return ok(personal_source_service.request_sync_loop_stop())
+
+
+@router.get("/sync-loop/status", status_code=200)
+def get_sync_loop_status():
+    """连续同步循环状态：运行中/轮次/最新一轮结果/作品总数。"""
+    return ok(personal_source_service.sync_loop_status())

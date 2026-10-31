@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -322,3 +323,135 @@ def last_sync_started_at(db: Session) -> str | None:
     """最近一次同步（含失败）的开始时间，供监控层判断间隔是否到期。"""
     last = health_repo.latest_poll_logs(db).get(SYNC_POLL_LOG_PLATFORM)
     return last.started_at if last is not None else None
+
+
+# ---------------------------------------------------------------------------
+# 连续同步循环（前端可控）：只读列表元数据，绝不携带 --download
+# ---------------------------------------------------------------------------
+
+LOOP_STATE_FILE = "loop_state.json"
+
+
+def _loop_f2_dir() -> Path:
+    return settings.workbuddy_dir / "f2"
+
+
+def _loop_state_path() -> Path:
+    return _loop_f2_dir() / LOOP_STATE_FILE
+
+
+def _read_loop_state() -> dict:
+    try:
+        return json.loads(_loop_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_loop_state(state: dict) -> None:
+    f2_dir = _loop_f2_dir()
+    f2_dir.mkdir(parents=True, exist_ok=True)
+    tmp = _loop_state_path().with_name("loop_state.json.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, _loop_state_path())
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def start_sync_loop(max_rounds: int = 60) -> dict:
+    """启动"连续同步到完整"循环子进程（只列表元数据，绝不下载）。
+
+    停止条件在 runner 内：用户停止 / 全部范围 complete / 连续 3 轮失败 /
+    达到 max_rounds。已运行时拒绝重复启动（同一时间只允许一个循环）。
+    """
+    if not isinstance(max_rounds, int) or not (1 <= max_rounds <= 200):
+        raise validation("max_rounds 需在 1~200 之间")
+    if not _runtime_python_exists():
+        raise validation("F2 隔离运行时未安装（tools/f2-runtime/.venv）")
+    if not _cookie_file_set():
+        raise validation("未配置抖音登录态文件（F2_DOUYIN_COOKIE_FILE 或 config/f2/douyin_cookie.txt）")
+
+    state = _read_loop_state()
+    if state.get("running") and _pid_alive(state.get("pid")):
+        raise validation("连续同步已在运行中，请先停止再重新启动")
+
+    _write_loop_state(
+        {
+            "running": True,
+            "started_at": now_iso(),
+            "max_rounds": int(max_rounds),
+            "stop_requested": False,
+            "rounds_done": 0,
+            "pid": None,
+        }
+    )
+    f2_dir = _loop_f2_dir()
+    f2_dir.mkdir(parents=True, exist_ok=True)
+    log_file = open(f2_dir / "loop.log", "ab")  # noqa: SIM115 - 循环期间持续追加
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - 固定模块名与整数参数
+            [sys.executable, "-m", "monitor.personal_source_loop", "--max-rounds", str(int(max_rounds))],
+            cwd=str(settings.workspace_root),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError:
+        log_file.close()
+        state = _read_loop_state()
+        state.update({"running": False, "final_status": "spawn_failed"})
+        _write_loop_state(state)
+        raise validation("连续同步执行器未能启动，请检查后端服务") from None
+    finally:
+        log_file.close()
+    state = _read_loop_state()
+    state.update({"pid": proc.pid})
+    _write_loop_state(state)
+    return {"started": True, "pid": proc.pid, "max_rounds": int(max_rounds), "state": state}
+
+
+def request_sync_loop_stop() -> dict:
+    """请求停止连续同步：置 stop_requested，runner 在轮间安全退出。"""
+    state = _read_loop_state()
+    if not state:
+        raise validation("尚无连续同步状态（从未启动）")
+    if not state.get("running"):
+        return {"stopped": False, "state": state}
+    state["stop_requested"] = True
+    _write_loop_state(state)
+    return {"stopped": True, "state": state}
+
+
+def _loop_live_totals() -> dict:
+    """只读汇总：作品总数与最近一轮 poll（供循环状态展示）。"""
+    con = sqlite3.connect(settings.database_path)
+    try:
+        total = con.execute("SELECT COUNT(*) FROM works WHERE platform='douyin'").fetchone()[0]
+        row = con.execute(
+            "SELECT status, new_works, finished_at FROM poll_logs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        return {"works_total": total, "last_poll": None}
+    return {"works_total": total, "last_poll": {"status": row[0], "new_works": row[1] or 0, "finished_at": row[2]}}
+
+
+def sync_loop_status() -> dict:
+    """连续同步循环的当前状态；进程死亡时如实纠正 running 标记。"""
+    state = _read_loop_state()
+    if not state:
+        return {"exists": False, "running": False, **_loop_live_totals()}
+    if state.get("running") and not _pid_alive(state.get("pid")):
+        state["running"] = False
+        state["final_status"] = state.get("final_status") or "process_exited"
+        _write_loop_state(state)
+    return {"exists": True, "running": bool(state.get("running")), "state": state, **_loop_live_totals()}

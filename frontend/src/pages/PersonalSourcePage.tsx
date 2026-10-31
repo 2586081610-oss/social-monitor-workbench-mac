@@ -3,13 +3,16 @@
  * 隐私约定：登录态 cookie 只在本机文件，页面不显示内容；同步失败原因如实展示。
  */
 import { useEffect, useState } from 'react';
-import { Heart, RefreshCw, Save } from 'lucide-react';
+import { Heart, Play, RefreshCw, Save, Square } from 'lucide-react';
 import { ErrorState, LoadingState } from '../components/common/StateViews';
 import { ToneBadge } from '../components/common/StatusBadge';
 import Toggle from '../components/common/Toggle';
 import {
   getPersonalSourceStatus,
+  getPersonalSyncLoopStatus,
   putPersonalSourceSchedule,
+  startPersonalSyncLoop,
+  stopPersonalSyncLoop,
   triggerPersonalSourceSync,
 } from '../services/personalSource';
 import type { PersonalScope } from '../services/personalSource';
@@ -125,6 +128,43 @@ export default function PersonalSourcePage() {
     }
   };
 
+  // 连续同步循环：状态轮询 + 启停
+  const loopQuery = useAsyncData(() => getPersonalSyncLoopStatus(), []);
+  usePolling(loopQuery.refetch, true, 15000);
+  const [startingLoop, setStartingLoop] = useState(false);
+  const [stoppingLoop, setStoppingLoop] = useState(false);
+  const [loopMsg, setLoopMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const startLoop = async (maxRounds: number) => {
+    setStartingLoop(true);
+    setLoopMsg(null);
+    try {
+      await startPersonalSyncLoop(maxRounds);
+      setLoopMsg({ ok: true, text: `连续同步已启动（上限 ${maxRounds} 轮）：只读列表元数据，绝不下载；可随时停止` });
+      loopQuery.refetch();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '启动失败';
+      setLoopMsg({ ok: false, text: message });
+    } finally {
+      setStartingLoop(false);
+    }
+  };
+
+  const stopLoop = async () => {
+    setStoppingLoop(true);
+    setLoopMsg(null);
+    try {
+      const res = await stopPersonalSyncLoop();
+      setLoopMsg({ ok: true, text: res.stopped ? '已请求停止：当前轮结束后安全退出（不中断进行中的轮）' : '循环本就未在运行' });
+      loopQuery.refetch();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '停止失败';
+      setLoopMsg({ ok: false, text: message });
+    } finally {
+      setStoppingLoop(false);
+    }
+  };
+
   if (statusQuery.loading && !statusQuery.data) return <LoadingState />;
   if (statusQuery.error && !statusQuery.data) {
     return <ErrorState message={statusQuery.error.message} onRetry={statusQuery.refetch} />;
@@ -217,6 +257,79 @@ export default function PersonalSourcePage() {
             {syncing ? '启动中…' : '立即同步一次'}
           </button>
         </div>
+      </Section>
+
+      <Section
+        title="连续同步到完整"
+        desc="一轮接一轮读取列表元数据（作品ID/标题/类型/发布时间/链接/封面），直到点赞、收藏、收藏夹全部完整。绝不下载媒体（下载由下方独立开关授权）；每轮 15 分钟预算限速，对账号最温和。"
+      >
+        {(() => {
+          const loop = loopQuery.data;
+          const st = loop?.state;
+          return (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <ToneBadge
+                  tone={loop?.running ? 'success' : 'neutral'}
+                  label={loop?.running ? `运行中：第 ${st?.rounds_done ?? 0} / ${st?.max_rounds ?? '-'} 轮` : '未在运行'}
+                />
+                {loop?.running && st?.stop_requested ? <ToneBadge tone="warning" label="已请求停止（本轮结束生效）" /> : null}
+                {!loop?.running && st?.final_status ? (
+                  <ToneBadge
+                    tone={st.final_status === 'all_complete' ? 'success' : 'warning'}
+                    label={
+                      st.final_status === 'all_complete'
+                        ? '全部范围完整 ✅'
+                        : st.final_status === 'stopped_by_user'
+                          ? '已手动停止'
+                          : st.final_status === 'max_rounds_reached'
+                            ? '达到轮数上限'
+                            : `结束：${st.final_status}`
+                    }
+                  />
+                ) : null}
+                {loop ? (
+                  <span className="text-xs text-ink-muted">
+                    作品总数 {loop.works_total}
+                    {loop.last_poll ? ` · 最近一轮 ${loop.last_poll.status}（新增 ${loop.last_poll.new_works}）` : ''}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {[30, 60, 120].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => startLoop(n)}
+                    disabled={startingLoop || stoppingLoop || !!loop?.running || !status?.runtime_available || !status?.cookie_file_set}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm text-white transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Play className="h-4 w-4" />
+                    启动（上限 {n} 轮）
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={stopLoop}
+                  disabled={stoppingLoop || startingLoop || !loop?.running}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-ink transition-colors hover:bg-sidebar disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Square className="h-4 w-4" />
+                  {stoppingLoop ? '停止中…' : '停止'}
+                </button>
+              </div>
+
+              {loopMsg ? (
+                <p className={`text-xs ${loopMsg.ok ? 'text-success' : 'text-danger'}`}>{loopMsg.text}</p>
+              ) : null}
+              <p className="text-xs leading-5 text-ink-muted">
+                自动停止条件：全部范围完整 / 连续 3 轮失败 / 达到轮数上限。运行中每轮结果写入同步历史；
+                停止在当前轮结束后生效，不中断进行中的读取。
+              </p>
+            </div>
+          );
+        })()}
       </Section>
 
       <Section

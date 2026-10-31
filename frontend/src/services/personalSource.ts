@@ -72,3 +72,48 @@ export function putPersonalSourceSchedule(payload: {
 export function triggerPersonalSourceSync(): Promise<PersonalSyncTriggered> {
   return postJson<PersonalSyncTriggered>('/api/v1/personal-source/sync');
 }
+
+export interface PersonalSyncLoopState {
+  running: boolean;
+  started_at: string | null;
+  max_rounds: number | null;
+  stop_requested: boolean;
+  rounds_done: number;
+  pid: number | null;
+  last_round: {
+    round_no: number;
+    exit: number;
+    poll_status: string;
+    new_works: number;
+    works_total: number;
+    at: string;
+  } | null;
+  finished_at: string | null;
+  final_status: string | null;
+}
+
+export interface PersonalSyncLoopStatus {
+  exists: boolean;
+  running: boolean;
+  state?: PersonalSyncLoopState;
+  works_total: number;
+  last_poll: { status: string; new_works: number; finished_at: string | null } | null;
+}
+
+/** 启动"连续同步到完整"循环：只读列表元数据，绝不下载（预算限速，轮间休息）。 */
+export function startPersonalSyncLoop(maxRounds: number = 60): Promise<{ started: boolean; pid: number; max_rounds: number }> {
+  return postJson<{ started: boolean; pid: number; max_rounds: number }>(
+    '/api/v1/personal-source/sync-loop',
+    { max_rounds: maxRounds },
+  );
+}
+
+/** 请求停止连续同步（当前轮结束后安全退出）。 */
+export function stopPersonalSyncLoop(): Promise<{ stopped: boolean }> {
+  return postJson<{ stopped: boolean }>('/api/v1/personal-source/sync-loop/stop', {});
+}
+
+/** 连续同步循环状态（轮次、最新一轮、作品总数）。 */
+export function getPersonalSyncLoopStatus(): Promise<PersonalSyncLoopStatus> {
+  return getJson<PersonalSyncLoopStatus>('/api/v1/personal-source/sync-loop/status');
+}
