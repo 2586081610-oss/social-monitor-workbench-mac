@@ -392,6 +392,58 @@ def download_via_mediacrawler(platform: str, target: str, out_dir: Path) -> str:
     return str(out_dir)
 
 
+_TWITTER_ANONYMOUS_MIN_BYTES = 100_000
+
+def _download_twitter_video_anonymous(media_dir: Path, tweet_url: str, proxy: str | None) -> bool:
+    """syndication 匿名视频通道：公开推文的 mp4 直链直接取文件，成功返回 True。
+
+    探测失败、无 mp4 变体、下载异常一律返回 False（调用方回退 yt-dlp）；
+    绝不把部分文件当成成功。仅接受 https 的 video.twimg.com 直链。
+    """
+    match = re.search(r"/status(?:es)?/(\d+)", tweet_url or "")
+    if not match:
+        return False
+    tweet_id = match.group(1)
+    try:
+        from monitor.platforms.twitter_syndication import fetch_tweet_media
+
+        media = fetch_tweet_media(tweet_id)
+    except Exception:  # noqa: BLE001 - 探测层任何异常都走回退
+        return False
+    if media is None or not media.video_variants:
+        return False
+    # 变体按码率降序：与既有 yt-dlp "worst" 约定一致，取最低码率 mp4
+    variant_url = media.video_variants[-1]
+    try:
+        import httpx
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Referer": "https://x.com/",
+        }
+        proxies = proxy or None
+        target = media_dir / f"twitter_{tweet_id}.mp4"
+        tmp = target.with_name(target.name + ".part")
+        downloaded = 0
+        with httpx.Client(timeout=60.0, headers=headers, proxy=proxies, follow_redirects=True) as client:
+            with client.stream("GET", variant_url) as response:
+                if response.status_code != 200:
+                    return False
+                with open(tmp, "wb") as fh:
+                    for chunk in response.iter_bytes():
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+        if downloaded < _TWITTER_ANONYMOUS_MIN_BYTES:
+            tmp.unlink(missing_ok=True)
+            return False
+        os.replace(tmp, target)
+        logger.info("twitter anonymous video downloaded: %s bytes", downloaded)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 下载异常回退 yt-dlp，由它如实报错
+        logger.warning("twitter anonymous video download failed: %s", type(exc).__name__)
+        return False
+
+
 def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
     if platform == "douyin":
         jiji_dir_value = os.getenv("DOUYIN_DOWNLOADER_DIR", "")
@@ -467,11 +519,16 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
         # 代理：用户显式 TWITTER_PROXY 优先，其次标准环境变量/macOS 系统设置（只读，
         # 不硬编码端口）；解析不到则直连。仅推特子进程使用，不改动全局代理。
         proxy = resolve_platform_proxy("TWITTER_PROXY")
+        if not cookies_file:
+            # 匿名基础路径：syndication 对公开推文提供 video.twimg.com 的 mp4 直链，
+            # 无需登录即可取文件（与"不打开网页播放"原则一致）；探测失败再走
+            # yt-dlp 尝试，由它如实报错。
+            if _download_twitter_video_anonymous(media_dir, url, proxy):
+                return
+            logger.warning("Twitter cookies are not configured; syndication variant unavailable, trying yt-dlp")
         command = [sys.executable, "-m", "yt_dlp", "-f", "worst[acodec!=none][vcodec!=none]/worstvideo+worstaudio/worst", url]
         if cookies_file:
             command += ["--cookies", str(cookies_file)]
-        else:
-            logger.warning("Twitter cookies are not configured")
         if proxy:
             command += ["--proxy", proxy]
         command += ["-o", str(media_dir / "%(title)s.%(ext)s")]

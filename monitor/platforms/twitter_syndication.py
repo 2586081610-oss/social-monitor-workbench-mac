@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urlsplit
 
 from monitor.pipeline.proxy import resolve_platform_proxy
@@ -19,6 +20,7 @@ logger = logging.getLogger("monitor.platforms.twitter_syndication")
 
 _SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result"
 _PBS_HOST = "pbs.twimg.com"
+_VIDEO_HOST = "video.twimg.com"
 _TIMEOUT_SECONDS = 12.0
 
 
@@ -28,21 +30,61 @@ class TweetMedia:
     created_at: str | None = None
     photos: list[str] = field(default_factory=list)
     has_video: bool = False
+    video_variants: list[str] = field(default_factory=list)
 
 
 def _valid_photo_url(url: str) -> bool:
+    return _valid_media_url(url, _PBS_HOST)
+
+
+def _valid_media_url(url: str, host: str) -> bool:
     try:
         parsed = urlsplit(url)
-        host = (parsed.hostname or "").lower().rstrip(".")
+        actual = (parsed.hostname or "").lower().rstrip(".")
     except (TypeError, ValueError):
         return False
     return (
         parsed.scheme == "https"
         and parsed.username is None
         and parsed.password is None
-        and (host == _PBS_HOST or host.endswith("." + _PBS_HOST))
+        and (actual == host or actual.endswith("." + host))
         and parsed.port in (None, 443)
     )
+
+
+def _video_variant_urls(media_items: list[Any]) -> list[str]:
+    """从 mediaDetails 的 video_info 变体里取 mp4 直链，码率高的在前。
+
+    仅接受 https 的 video.twimg.com 直链；m3u8/未知域名一律排除——
+    syndication 的返回内容不能当作任意 URL 下载源。
+    """
+    urls: list[tuple[int, str]] = []
+    for item in media_items:
+        if not isinstance(item, dict) or str(item.get("type", "")).lower() != "video":
+            continue
+        info = item.get("video_info") or item.get("videoInfo") or {}
+        variants = info.get("variants") if isinstance(info, dict) else None
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            if str(variant.get("content_type", "")).lower() != "video/mp4":
+                continue
+            url = variant.get("content_url") or variant.get("url")
+            if not isinstance(url, str) or not _valid_media_url(url, _VIDEO_HOST):
+                continue
+            # content_type 可能误标：只认 .mp4 路径，排除 .m4a 音频变体
+            if not urlsplit(url).path.lower().endswith(".mp4"):
+                continue
+            try:
+                bitrate = int(variant.get("bitrate") or 0)
+            except (TypeError, ValueError):
+                bitrate = 0
+            if url not in [u for _, u in urls]:
+                urls.append((bitrate, url))
+    urls.sort(key=lambda pair: pair[0], reverse=True)
+    return [url for _, url in urls]
 
 
 def fetch_tweet_media(tweet_id: str) -> TweetMedia | None:
@@ -96,6 +138,9 @@ def fetch_tweet_media(tweet_id: str) -> TweetMedia | None:
             continue
         if kind == "photo" and _valid_photo_url(url) and url not in photos:
             photos.append(url)
+    video_variants = _video_variant_urls(media_items)
+    if video_variants:
+        has_video = True
     text = payload.get("text")
     created_at = payload.get("created_at")
     return TweetMedia(
@@ -103,4 +148,5 @@ def fetch_tweet_media(tweet_id: str) -> TweetMedia | None:
         created_at=created_at if isinstance(created_at, str) else None,
         photos=photos,
         has_video=has_video,
+        video_variants=video_variants,
     )
