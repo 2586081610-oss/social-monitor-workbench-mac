@@ -181,6 +181,23 @@ def _explicit_pinned(raw: dict) -> bool:
     return False
 
 
+# 楼中楼「回复 @某人：内容」前缀：小红书把被回复人放在子评论内容开头，
+# 平台 API 不单独下发目标用户字段，只能从内容前缀解析。
+_REPLY_AT_PREFIX = re.compile(r"^回复\s*@\s*([^\s：:]{1,50})")
+
+
+def _reply_target_nickname(raw: dict, *, is_reply: bool) -> str | None:
+    """解析子评论的被回复人昵称：API 显式字段优先，其次内容「回复 @」前缀。"""
+    for key in ("target_user_nickname", "targetUserNickname", "reply_to_nickname"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:50]
+    if not is_reply:
+        return None
+    match = _REPLY_AT_PREFIX.match(str(raw.get("content") or "").strip())
+    return match.group(1) if match else None
+
+
 def normalize_comment(
     raw: dict,
     *,
@@ -216,6 +233,7 @@ def normalize_comment(
         "content_status": "present" if str(content).strip() else "empty",
         "like_count": to_int(raw.get("like_count", raw.get("likeCount", raw.get("liked_count")))),
         "nickname": nickname,
+        "reply_to_nickname": _reply_target_nickname(raw, is_reply=bool(parent)),
         "created_at": created_at,
         "created_at_raw": created_raw,
         "created_at_precision": precision,

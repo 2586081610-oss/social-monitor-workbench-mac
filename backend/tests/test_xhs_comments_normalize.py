@@ -248,3 +248,33 @@ def test_carry_forward_collapses_mirror_picture_entries():
     core._carry_forward(old, new)
     assert len(new["pictures"]) == 1
     assert new["pictures"][0]["status"] == "downloaded"
+
+
+# ---------- 楼中楼被回复人（reply_to_nickname）解析 ----------
+
+def test_reply_to_nickname_parsed_from_content_prefix():
+    """子评论内容带「回复 @某人：」前缀 → 提取被回复人昵称；主评论不解析。"""
+    reply = core.normalize_comment(
+        raw("r9", "回复 @伤心荷包蛋：你说得对", parent="c1"), parent_comment_id="c1"
+    )
+    assert reply["reply_to_nickname"] == "伤心荷包蛋"
+    # 内容保持原样，不改写
+    assert reply["content"] == "回复 @伤心荷包蛋：你说得对"
+
+    main = core.normalize_comment(raw("c9", "回复 @某人：主评论不该解析前缀"), platform_order=0)
+    assert main["reply_to_nickname"] is None
+
+
+def test_reply_to_nickname_prefers_explicit_api_field():
+    """API 显式下发目标用户时优先于内容前缀。"""
+    reply = core.normalize_comment(
+        raw("r8", "回复 @内容里的名字：hi", parent="c1", target_user_nickname="API字段名"),
+        parent_comment_id="c1",
+    )
+    assert reply["reply_to_nickname"] == "API字段名"
+
+
+def test_reply_to_nickname_absent_for_plain_reply():
+    """普通子评论（无前缀、无 API 字段）→ None，不猜测。"""
+    reply = core.normalize_comment(raw("r7", "普通回复内容", parent="c1"), parent_comment_id="c1")
+    assert reply["reply_to_nickname"] is None
