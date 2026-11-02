@@ -464,6 +464,7 @@ export default function PersonalSourcePage() {
                   <th className="w-20 px-2 py-2 font-medium">类型</th>
                   <th className="w-24 px-2 py-2 font-medium">发布时间</th>
                   <th className="w-24 px-2 py-2 font-medium">状态</th>
+                  <th className="w-28 px-2 py-2 font-medium">分类</th>
                   <th className="w-12 px-2 py-2 font-medium">链接</th>
                   <th className="w-24 px-2 py-2 font-medium">媒体路径</th>
                 </tr>
@@ -506,6 +507,18 @@ export default function PersonalSourcePage() {
                         tone={w.status === 'DOWNLOADED' || w.status === 'DONE' ? 'success' : w.status === 'FAILED' ? 'danger' : 'neutral'}
                         label={STATUS_LABELS[w.status ?? ''] ?? w.status ?? '—'}
                       />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {w.category_label ? (
+                        <span
+                          title={`分类 ${w.category_label}（${w.category_confidence === 'high' ? '高置信' : w.category_confidence === 'medium' ? '中置信' : '低置信·待转写仲裁'}）${w.category_action === 'note' ? '，将生成 AI 笔记' : '，仅归档'}`}
+                        >
+                          <ToneBadge
+                            tone={w.category_action === 'note' ? 'success' : 'neutral'}
+                            label={w.category_label}
+                          />
+                        </span>
+                      ) : '—'}
                     </td>
                     <td className="px-2 py-1.5">
                       {w.url ? (

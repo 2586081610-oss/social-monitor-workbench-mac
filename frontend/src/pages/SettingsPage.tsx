@@ -13,6 +13,7 @@ import {
   switchAccountCookie,
 } from '../services/health';
 import { getArchivePolicy } from '../services/archive';
+import { getSummaryTargetsHealth, type SummaryTargetHealth } from '../services/summaryTargets';
 import { useAsyncData, usePolling } from '../hooks/useApi';
 import { useRelogin } from '../state/relogin';
 import { API_BASE_URL, getToken, setToken } from '../config/api';
@@ -71,7 +72,9 @@ export default function SettingsPage() {
   const cookieQuery = useAsyncData(() => getCookieHealth(), []);
   const systemQuery = useAsyncData(() => getSystemHealth(), []);
   const archivePolicyQuery = useAsyncData(() => getArchivePolicy(), []);
+  const summaryHealthQuery = useAsyncData(() => getSummaryTargetsHealth(), []);
   usePolling(cookieQuery.refetch, true, 30000);
+  usePolling(summaryHealthQuery.refetch, true, 60000);
 
   const cookies = cookieQuery.data?.items ?? [];
   const systems = systemQuery.data?.items ?? [];
@@ -258,6 +261,62 @@ export default function SettingsPage() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </Section>
+
+      {/* AI 笔记执行者健康：通/不通按队列真实消费记录判定（后端不编造） */}
+      <Section title="AI 笔记执行者健康" desc="四个执行者（ZCode/Codex/Trae/WorkBuddy）谁在干活、谁没接上、谁额度耗尽——按队列里的真实消费记录判定，探测不到的如实显示。切换方法见 docs/AI笔记执行者切换手册.md。">
+        {summaryHealthQuery.loading ? (
+          <LoadingState label="加载执行者状态…" />
+        ) : summaryHealthQuery.error ? (
+          <ErrorState message={summaryHealthQuery.error.message} onRetry={summaryHealthQuery.refetch} />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[680px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-line text-xs uppercase tracking-widest text-ink-muted">
+                  <th className="px-3 py-2 font-semibold">执行者</th>
+                  <th className="px-3 py-2 font-semibold">状态</th>
+                  <th className="px-3 py-2 font-semibold">待笔记</th>
+                  <th className="px-3 py-2 font-semibold">已完成</th>
+                  <th className="px-3 py-2 font-semibold">错误</th>
+                  <th className="px-3 py-2 font-semibold">最近完成</th>
+                  <th className="px-3 py-2 font-semibold">说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(summaryHealthQuery.data?.targets ?? []).map((t: SummaryTargetHealth) => {
+                  const badge =
+                    t.status === 'active' ? { tone: 'success' as const, label: '✅ 运行中' }
+                    : t.status === 'quota_exhausted' ? { tone: 'danger' as const, label: '⚡ 额度耗尽' }
+                    : t.status === 'no-consumer' ? { tone: 'warning' as const, label: '⚠ 未接执行者' }
+                    : t.status === 'idle' ? { tone: 'neutral' as const, label: '闲置' }
+                    : { tone: 'neutral' as const, label: '空闲' };
+                  return (
+                    <tr key={t.name} className="border-b border-line">
+                      <td className="px-3 py-2 font-medium text-ink">
+                        {t.name}{t.is_default ? <span className="ml-1 text-xs text-primary">（默认）</span> : null}
+                      </td>
+                      <td className="px-3 py-2"><ToneBadge tone={badge.tone} label={badge.label} /></td>
+                      <td className="px-3 py-2 text-ink-muted">{t.pending_count}</td>
+                      <td className="px-3 py-2 text-ink-muted">{t.done_count}</td>
+                      <td className="px-3 py-2">
+                        {t.error_count > 0 ? (
+                          <span className="text-danger" title={t.quota_exhausted_count ? '含额度耗尽标记' : undefined}>
+                            {t.error_count}{t.quota_exhausted_count ? ' ⚡' : ''}
+                          </span>
+                        ) : '0'}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-ink-muted" title={t.last_executor ?? ''}>
+                        {t.last_done_at ? `${t.last_done_at.slice(0, 16).replace('T', ' ')} · ${t.last_executor ?? ''}` : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-ink-muted">{t.cli?.note}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </Section>

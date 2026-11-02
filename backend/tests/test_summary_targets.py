@@ -124,3 +124,44 @@ def test_provenance_hashes_real_files(tmp_path):
     assert roles["video"]["sha256"] is not None
     assert roles["transcript"]["sha256"] is None
     assert prov["frames_count"] == 0
+
+
+class TestHealthReport:
+    """执行者健康报告：只按队列里的真实消费记录判定，不编造连通性。"""
+
+    def _write_pkg(self, pending_dir, name, payload):
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def test_status_by_real_consumption_evidence(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(summary_target_service.settings, "workspace_root", tmp_path)
+        monkeypatch.setattr(summary_target_service.settings, "pending_dir", tmp_path / "workbuddy" / "pending")
+        monkeypatch.setattr(summary_target_service.settings, "workbuddy_dir", tmp_path / "workbuddy")
+
+        wb = tmp_path / "workbuddy" / "pending"
+        # zcode/workbuddy 共用队列：有 7 天内 done → active
+        self._write_pkg(wb, "1.json", {
+            "work_id": 1, "status": "done",
+            "dispatch": {"executor": "zcode-desktop", "completed_at": "2026-11-01T12:00:00Z"},
+        })
+        # codex：有 pending + quota_exhausted 回执 → quota_exhausted
+        codex = tmp_path / "summary_targets" / "codex" / "pending"
+        self._write_pkg(codex, "2.json", {"work_id": 2, "status": "pending"})
+        codex.mkdir(parents=True, exist_ok=True)
+        (codex / "2.error.json").write_text('{"error": "quota_exhausted"}', encoding="utf-8")
+        # trae：只有 pending 从未消费 → no-consumer
+        trae = tmp_path / "summary_targets" / "trae" / "pending"
+        self._write_pkg(trae, "3.json", {"work_id": 3, "status": "pending"})
+
+        report = summary_target_service.health_report()
+        by_name = {t["name"]: t for t in report["targets"]}
+        assert by_name["workbuddy"]["status"] == "active"
+        assert by_name["workbuddy"]["last_executor"] == "zcode-desktop"
+        assert by_name["workbuddy"]["done_count"] == 1
+        assert by_name["codex"]["status"] == "quota_exhausted"
+        assert by_name["codex"]["quota_exhausted_count"] == 1
+        assert by_name["trae"]["status"] == "no-consumer"
+        assert by_name["trae"]["done_count"] == 0
+        # cli 探测：workbuddy 是 App 无法探测 → None；zcode 桌面 App 在装 → True
+        assert by_name["workbuddy"]["cli"]["available"] is None
+        assert by_name["zcode"]["cli"]["available"] is True

@@ -130,6 +130,10 @@ export interface PersonalWorkItem {
   source_marks: string[];
   folder_name: string | null;
   occurred_at: string | null;
+  category?: string | null;
+  category_label?: string | null;
+  category_action?: string | null;
+  category_confidence?: string | null;
 }
 
 export interface PersonalWorksPage {

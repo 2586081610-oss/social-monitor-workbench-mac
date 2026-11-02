@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +116,102 @@ def resolve_target(name: str | None = None) -> dict[str, Any]:
             root = settings.workspace_root / root
         return {"name": name, "kind": "directory", "pending_dir": root / "pending", "expected_root": root / "output"}
     raise validation("SUMMARY_TARGET_KIND_UNKNOWN")
+
+
+def _parse_iso_z(value: Any) -> "datetime | None":
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _cli_probe(name: str) -> dict[str, Any]:
+    """执行者 CLI/App 可用性探测（只探测本机安装事实，不装也不编造）。"""
+    if name == "zcode":
+        from monitor.note_dispatcher import _default_zcode_command
+
+        detected = _default_zcode_command()
+        return {"available": detected is not None, "note": "桌面 App 内置无头 CLI" if detected else "未找到 ZCode"}
+    if name == "codex":
+        found = shutil.which("codex") is not None
+        return {"available": found, "note": "codex CLI 在 PATH" if found else "codex CLI 不在 PATH（可用 Codex 桌面端自动化替代）"}
+    if name == "trae":
+        found = shutil.which("trae-cli") is not None
+        return {"available": found, "note": "trae-cli 在 PATH" if found else "trae-agent 未安装（github.com/bytedance/trae-agent）"}
+    # workbuddy：App 内的自动化后端无法探测，如实 unknown
+    return {"available": None, "note": "由 WorkBuddy App 定时自动化执行，后端无法探测"}
+
+
+def health_report() -> dict[str, Any]:
+    """各执行者健康报告（证据导向：只看队列里的真实消费记录，不编造连通性）。
+
+    status 判定优先级：
+      quota_exhausted（有额度耗尽回执，需人工切换）
+      > active（7 天内有真实完成记录）
+      > no-consumer（有 pending 但从未有 done）
+      > idle（有 done 但已超过 7 天）
+      > empty（队列空且无记录，无需消费者）
+    """
+    data = load_summary_settings()
+    now = datetime.now(timezone.utc)
+    targets = []
+    for name in data["targets"]:
+        resolved = resolve_target(name)
+        pending_dir = Path(resolved["pending_dir"])
+        pending_count = done_count = error_count = quota_hits = 0
+        last_done_at: "datetime | None" = None
+        last_executor: str | None = None
+        if pending_dir.is_dir():
+            for f in pending_dir.glob("*.json"):
+                try:
+                    pkg = json.loads(f.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                status = pkg.get("status")
+                if status == "pending":
+                    pending_count += 1
+                elif status == "done":
+                    done_count += 1
+                    dispatch = pkg.get("dispatch") or {}
+                    ts = _parse_iso_z(dispatch.get("completed_at"))
+                    if ts and (last_done_at is None or ts > last_done_at):
+                        last_done_at, last_executor = ts, dispatch.get("executor")
+            for e in pending_dir.glob("*.error.json"):
+                try:
+                    text = e.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                error_count += 1
+                if "quota_exhausted" in text:
+                    quota_hits += 1
+        if quota_hits:
+            status = "quota_exhausted"
+        elif last_done_at is not None and now - last_done_at <= timedelta(days=7):
+            status = "active"
+        elif pending_count > 0 and done_count == 0:
+            status = "no-consumer"
+        elif done_count:
+            status = "idle"
+        else:
+            status = "empty"
+        targets.append(
+            {
+                "name": name,
+                "kind": resolved["kind"],
+                "is_default": name == data["default_target"],
+                "pending_count": pending_count,
+                "done_count": done_count,
+                "error_count": error_count,
+                "quota_exhausted_count": quota_hits,
+                "last_done_at": last_done_at.isoformat() if last_done_at else None,
+                "last_executor": last_executor,
+                "status": status,
+                "cli": _cli_probe(name),
+            }
+        )
+    return {"default_target": data["default_target"], "targets": targets}
 
 
 def sha256_of(path: Path) -> str | None:

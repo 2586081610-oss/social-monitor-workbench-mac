@@ -25,6 +25,12 @@ def list_summary_targets():
     return ok(summary_target_service.list_targets())
 
 
+@router.get("/health")
+def summary_targets_health():
+    """各执行者的健康报告（基于真实消费记录判断，不编造）。"""
+    return ok(summary_target_service.health_report())
+
+
 @router.put("/default")
 def set_default_summary_target(payload: DefaultTargetUpdate):
     data = summary_target_service.set_default_target(payload.target)

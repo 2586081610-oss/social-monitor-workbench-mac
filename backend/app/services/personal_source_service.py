@@ -552,8 +552,12 @@ def list_personal_works(
             if "favorite" not in entry["marks"]:
                 entry["marks"].append("favorite")
     items = []
+    # 分诊类目（monitor.triage，标题粗分层；转写仲裁在流水线/调度器侧做）
+    from monitor.triage import classify
+
     for w in rows:
         entry = marks_map.get(w.external_id, {})
+        triage = classify(w.title or "")
         items.append(
             {
                 "external_id": w.external_id,
@@ -567,6 +571,10 @@ def list_personal_works(
                 "source_marks": entry.get("marks") or [],
                 "folder_name": entry.get("folder_name"),
                 "occurred_at": entry.get("occurred_at"),
+                "category": triage.category,
+                "category_label": triage.label,
+                "category_action": triage.action,
+                "category_confidence": triage.confidence,
             }
         )
     return {"total": total, "limit": limit, "offset": offset, "items": items}
