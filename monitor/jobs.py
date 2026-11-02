@@ -30,7 +30,7 @@ from app.services.archive_checkpoint_service import (  # noqa: E402
 from app.services.archive_metadata_resolver import resolve_archive_metadata  # noqa: E402
 from app.services.archive_sync_service import sync_archive_entry  # noqa: E402
 from app.utils.archive_paths import relative_path_from_root, resolve_archive_path  # noqa: E402
-from app.utils.timeutil import now_iso  # noqa: E402
+from app.utils.timeutil import now_iso, parse_iso  # noqa: E402
 
 from monitor.pipeline import download, frames, notify, transcribe  # noqa: E402
 from monitor.pipeline.download import PipelineOfflineError  # noqa: E402
@@ -42,6 +42,56 @@ from monitor.platforms.xhs_mediacrawler import XhsMediacrawlerAdapter  # noqa: E
 logger = logging.getLogger("monitor.jobs")
 
 RSSHUB_PLATFORMS = ("bilibili", "twitter")
+
+# v0.8 每博主自定义检测间隔：NULL=跟随平台默认（全局轮询间隔）；失败统一 30 分钟重试
+_PLATFORM_DEFAULT_INTERVALS = {
+    "bilibili": lambda: settings.poll_rsshub_interval,
+    "twitter": lambda: settings.poll_rsshub_interval,
+    "douyin": lambda: settings.poll_douyin_interval,
+    "xhs": lambda: settings.poll_xhs_interval,
+}
+_FAILURE_RETRY_SECONDS = 30 * 60
+
+
+def _creator_effective_interval(creator: Creator) -> int:
+    """该博主下一次成功检测的等待秒数：自定义间隔优先，否则平台默认。"""
+    custom = getattr(creator, "poll_interval_seconds", None)
+    if isinstance(custom, int) and custom > 0:
+        return custom
+    factory = _PLATFORM_DEFAULT_INTERVALS.get(creator.platform)
+    return int(factory()) if factory else 300
+
+
+def _creator_due(creator: Creator, *, now: datetime | None = None) -> bool:
+    """该博主本轮是否到期：next_poll_at 为空或已过即到期（老数据/新博主立即检测）。"""
+    nxt = parse_iso(getattr(creator, "next_poll_at", None))
+    if nxt is None:
+        return True
+    now = now or datetime.now(timezone.utc)
+    return nxt <= now
+
+
+def _mark_creator_success(creator: Creator) -> None:
+    """成功检测：按博主间隔排下一次，清零失败计数与错误。"""
+    from datetime import timedelta
+
+    creator.last_poll_at = now_iso()
+    creator.next_poll_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=_creator_effective_interval(creator))
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    creator.poll_fail_streak = 0
+    creator.last_poll_error = None
+
+
+def _mark_creator_failure(creator: Creator, message: str) -> None:
+    """失败检测：30 分钟后重试；连续失败计数递增（≥2 前端警示）。"""
+    from datetime import timedelta
+
+    creator.poll_fail_streak = (creator.poll_fail_streak or 0) + 1
+    creator.next_poll_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=_FAILURE_RETRY_SECONDS)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    creator.last_poll_error = (message or "unknown error")[:200]
 
 
 def _producer_time_fields(item: dict) -> dict:
@@ -123,7 +173,7 @@ def _upsert_creator_entries(db: Session, creator: Creator, entries: list[dict]) 
             task_repo.upsert(db, work.id, "parse", "pending")
             work.status = "QUEUED"
             creator.last_work_at = now_iso()
-    creator.last_poll_at = now_iso()
+    _mark_creator_success(creator)
     return new_count
 
 
@@ -140,9 +190,12 @@ def poll_rsshub_platform(platform: str) -> None:
         ).scalars().all()
         total_new = 0
         for creator in creators:
+            if not _creator_due(creator):
+                continue
             try:
                 entries = adapter.fetch_entries(platform, creator.external_id)
             except RSSHubError as exc:
+                _mark_creator_failure(creator, exc.message)
                 _update_cookie(db, platform, "WARN", exc.message)
                 health_repo.create_poll_log(db, platform, "fail", detail=exc.category, started_at=started)
                 db.commit()
@@ -219,9 +272,12 @@ def poll_douyin() -> None:
             sec_uid = creator.external_id or ""
             if not sec_uid:
                 continue
+            if not _creator_due(creator):
+                continue
             try:
                 entries = adapter.poll_creator(sec_uid)
             except Exception as e:  # noqa: BLE001  单博主失败不阻塞其余
+                _mark_creator_failure(creator, f"mediacrawler 异常: {str(e)[:120]}")
                 failed_count += 1
                 logger.warning("douyin 博主 %s 爬取异常: %s", creator.name, e)
                 health_repo.create_poll_log(db, "douyin", "fail", detail=f"mediacrawler 异常: {str(e)[:120]}", started_at=started)
@@ -241,9 +297,12 @@ def _poll_xhs_creators(db, creators) -> int:
         profile_url = creator.profile_url or ""
         if not profile_url:
             continue
+        if not _creator_due(creator):
+            continue
         try:
             entries = adapter.poll_creator(profile_url)
         except Exception as e:  # noqa: BLE001  单博主失败不阻塞其余
+            _mark_creator_failure(creator, f"xhs 异常: {str(e)[:120]}")
             logger.warning("xhs 博主 %s 爬取异常: %s", creator.name, e)
             continue
         total_new += _upsert_creator_entries(db, creator, entries)

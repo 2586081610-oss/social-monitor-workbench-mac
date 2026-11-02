@@ -19,6 +19,8 @@ class CreatorUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     group_id: int | None = None
     enabled: bool | None = None
+    # 自定义检测间隔（秒，60s~30天）；None=恢复跟随平台默认
+    poll_interval_seconds: int | None = Field(default=None, ge=60, le=2_592_000)
 
 
 class Creator(BaseModel):
@@ -33,6 +35,10 @@ class Creator(BaseModel):
     enabled: bool
     last_poll_at: str | None
     last_work_at: str | None
+    poll_interval_seconds: int | None = None
+    next_poll_at: str | None = None
+    poll_fail_streak: int = 0
+    last_poll_error: str | None = None
     created_at: str
     updated_at: str
 

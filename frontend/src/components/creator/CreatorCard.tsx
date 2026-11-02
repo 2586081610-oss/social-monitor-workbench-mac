@@ -1,6 +1,6 @@
-/** 博主卡片：头像占位 / 名称 / 分组 / 平台 / 监控状态 / 最近作品缩略+状态徽标 / 启停 / 立即爬取 / 删除。 */
+/** 博主卡片：头像占位 / 名称 / 分组 / 平台 / 监控状态 / 检测间隔编辑 / 失败警示 / 最近作品缩略+状态徽标 / 启停 / 立即爬取 / 删除。 */
 import { Link } from 'react-router-dom';
-import { Pause, Play, RefreshCw, Trash2, User } from 'lucide-react';
+import { AlertTriangle, Pause, Play, RefreshCw, Trash2, User } from 'lucide-react';
 import { useState } from 'react';
 import { deleteCreator, updateCreator } from '../../services/creators';
 import { pollNow } from '../../services/monitor';
@@ -17,6 +17,17 @@ interface CreatorCardProps {
   recentWorks?: WorkSummary[];
   onChanged: () => void;
 }
+
+/** 检测间隔预设；value=-1 表示进入自定义输入。 */
+const INTERVAL_PRESETS: { label: string; value: number | null }[] = [
+  { label: '跟随平台', value: null },
+  { label: '30分钟', value: 1_800 },
+  { label: '1小时', value: 3_600 },
+  { label: '6小时', value: 21_600 },
+  { label: '12小时', value: 43_200 },
+  { label: '24小时', value: 86_400 },
+  { label: '自定义…', value: -1 },
+];
 
 /** 最近作品状态二分：有笔记=已完成（绿）；NOTE_GENERATING 无笔记=AI 笔记未完成（灰，不转圈）；其余按状态色。 */
 function recentWorkMeta(w: WorkSummary): { label: string; className: string } {
@@ -35,6 +46,43 @@ export default function CreatorCard({ creator, groupName, recentWorks = [], onCh
   const deleteMutation = useMutation((id: number) => deleteCreator(id));
   const [pollPending, setPollPending] = useState(false);
   const [pollTriggered, setPollTriggered] = useState(false);
+
+  // 检测间隔：预设下拉 + 自定义分钟输入（保存即生效，next_poll_at 由后端按上次成功时间重排）
+  const isCustomInterval =
+    creator.poll_interval_seconds != null &&
+    !INTERVAL_PRESETS.some((p) => p.value === creator.poll_interval_seconds);
+  const [customMode, setCustomMode] = useState(isCustomInterval);
+  const [customMinutes, setCustomMinutes] = useState(
+    creator.poll_interval_seconds ? Math.max(1, Math.round(creator.poll_interval_seconds / 60)) : 60,
+  );
+  const [intervalSaving, setIntervalSaving] = useState(false);
+
+  const saveInterval = async (seconds: number | null) => {
+    setIntervalSaving(true);
+    try {
+      await updateCreator(creator.id, { poll_interval_seconds: seconds });
+      onChanged();
+    } catch {
+      /* 错误由页面统一提示 */
+    } finally {
+      setIntervalSaving(false);
+    }
+  };
+
+  const handleIntervalSelect = async (raw: string) => {
+    if (raw === '-1') {
+      setCustomMode(true);
+      return;
+    }
+    setCustomMode(false);
+    await saveInterval(raw === '' ? null : Number(raw));
+  };
+
+  const handleCustomSave = async () => {
+    const minutes = Math.max(1, Math.round(Number(customMinutes) || 0));
+    setCustomMinutes(minutes);
+    await saveInterval(minutes * 60);
+  };
 
   const handleToggle = async () => {
     try {
@@ -102,16 +150,74 @@ export default function CreatorCard({ creator, groupName, recentWorks = [], onCh
         </button>
       </div>
 
-      <dl className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink-secondary">
+      <dl className="mt-3 grid grid-cols-3 gap-2 text-xs text-ink-secondary">
         <div>
           <dt className="text-ink-muted">最近轮询</dt>
           <dd className="truncate-1">{formatRelativeTime(creator.last_poll_at)}</dd>
+        </div>
+        <div>
+          <dt className="text-ink-muted">下次检测</dt>
+          <dd className="truncate-1" title={creator.next_poll_at ?? undefined}>
+            {creator.next_poll_at ? formatDateTime(creator.next_poll_at) : '待首轮检测'}
+          </dd>
         </div>
         <div>
           <dt className="text-ink-muted">最近作品</dt>
           <dd className="truncate-1">{creator.last_work_at ? formatDateTime(creator.last_work_at) : '—'}</dd>
         </div>
       </dl>
+
+      {/* 检测间隔编辑：预设下拉（含自定义分钟数） */}
+      <div className="mt-3 flex items-center gap-2 text-xs">
+        <span className="shrink-0 text-ink-muted">检测间隔</span>
+        <select
+          value={customMode ? '-1' : (creator.poll_interval_seconds ?? '')}
+          onChange={(e) => void handleIntervalSelect(e.target.value)}
+          disabled={intervalSaving}
+          className="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1 text-xs text-ink transition-colors focus:border-primary disabled:opacity-60"
+          title="该博主多久自动检测一次新作品；失败后统一 30 分钟重试"
+        >
+          {INTERVAL_PRESETS.map((p) => (
+            <option key={p.label} value={p.value ?? ''}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        {customMode && (
+          <>
+            <input
+              type="number"
+              min={1}
+              value={customMinutes}
+              onChange={(e) => setCustomMinutes(Number(e.target.value))}
+              className="w-16 rounded-md border border-line bg-surface px-2 py-1 text-xs text-ink focus:border-primary"
+              aria-label="自定义检测间隔（分钟）"
+            />
+            <span className="shrink-0 text-ink-muted">分钟</span>
+            <button
+              type="button"
+              onClick={() => void handleCustomSave()}
+              disabled={intervalSaving}
+              className="shrink-0 rounded-md bg-primary px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-primary-hover disabled:opacity-60"
+            >
+              保存
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* 连续检测失败警示（≥2 次） */}
+      {(creator.poll_fail_streak ?? 0) >= 2 && (
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-danger/40 bg-danger-light px-3 py-2 text-xs text-danger">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-semibold">连续 {creator.poll_fail_streak} 次检测失败，每 30 分钟自动重试</p>
+            {creator.last_poll_error && (
+              <p className="mt-0.5 break-all text-[11px] opacity-80">{creator.last_poll_error}</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 最近作品缩略 + 状态徽标 */}
       <div className="mt-3 space-y-1.5">

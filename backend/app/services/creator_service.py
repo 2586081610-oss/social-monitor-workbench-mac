@@ -1,6 +1,8 @@
 """creators 业务：添加/修改/删除/详情。"""
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -8,6 +10,7 @@ from app.core.errors import conflict, not_found, validation
 from app.repositories import creator_repo, group_repo, work_repo
 from app.schemas.creator import Creator, CreatorDetail, CreatorPage, CreatorUpdate
 from app.schemas.work import WorkSummary
+from app.utils.timeutil import parse_iso
 
 
 def _to_schema(creator) -> Creator:
@@ -49,6 +52,16 @@ class CreatorService:
             if group_id is not None and group_repo.get(db, group_id) is None:
                 raise validation("GROUP_NOT_FOUND")
             fields["group_id"] = group_id
+        if "poll_interval_seconds" in payload.model_fields_set:
+            # 显式传 None = 清除自定义、恢复跟随平台默认；改间隔后下次检测从上次成功时间起算
+            fields["poll_interval_seconds"] = payload.poll_interval_seconds
+            last = parse_iso(creator.last_poll_at)
+            if last and payload.poll_interval_seconds:
+                fields["next_poll_at"] = (
+                    last + timedelta(seconds=payload.poll_interval_seconds)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            else:
+                fields["next_poll_at"] = None  # 从未轮询或恢复默认 → 立即到期
         creator = creator_repo.update(db, creator, **fields)
         db.commit()
         return _to_schema(creator)

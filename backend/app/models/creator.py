@@ -29,6 +29,11 @@ class Creator(Base):
     enabled: Mapped[int] = mapped_column(nullable=False, default=1)
     last_poll_at: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_work_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v0.8：每博主自定义检测间隔（秒，NULL=跟随平台默认）；到期调度与失败重试状态
+    poll_interval_seconds: Mapped[int | None] = mapped_column(nullable=True)
+    next_poll_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    poll_fail_streak: Mapped[int] = mapped_column(nullable=False, default=0)
+    last_poll_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=now_iso)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False, default=now_iso, onupdate=now_iso)
 

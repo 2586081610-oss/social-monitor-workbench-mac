@@ -88,6 +88,11 @@ def init_db(*, db_engine=None, session_factory=None, create_dirs: bool = True) -
         # v0.7 迁移：个人来源下载的跨进程原子认领（幂等，老库补列）
         _ensure_column(conn, "works", "download_claimed_at", "TEXT")
         _ensure_column(conn, "works", "download_claim_pid", "INTEGER")
+        # v0.8 迁移：creators 每博主自定义检测间隔 + 失败重试/警示状态（幂等，老库补列）
+        _ensure_column(conn, "creators", "poll_interval_seconds", "INTEGER")
+        _ensure_column(conn, "creators", "next_poll_at", "TEXT")
+        _ensure_column(conn, "creators", "poll_fail_streak", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "creators", "last_poll_error", "TEXT")
 
     with session_factory() as db:
         from app.repositories.health_repo import get_cookie, upsert_cookie

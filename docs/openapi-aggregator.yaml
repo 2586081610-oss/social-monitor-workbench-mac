@@ -1507,6 +1507,12 @@ components:
           nullable: true
         enabled:
           type: boolean
+        poll_interval_seconds:
+          type: integer
+          nullable: true
+          minimum: 60
+          maximum: 2592000
+          description: 自定义检测间隔（秒）；null=清除自定义、恢复跟随平台默认
 
     Creator:
       type: object
@@ -1521,6 +1527,10 @@ components:
         enabled: { type: boolean }
         last_poll_at: { type: string, format: date-time, nullable: true }
         last_work_at: { type: string, format: date-time, nullable: true }
+        poll_interval_seconds: { type: integer, nullable: true, description: 自定义检测间隔（秒），null=跟随平台默认 }
+        next_poll_at: { type: string, format: date-time, nullable: true, description: 下次计划检测时间（null=立即到期） }
+        poll_fail_streak: { type: integer, description: 连续检测失败次数，≥2 前端警示 }
+        last_poll_error: { type: string, nullable: true, description: 最近一次检测失败原因 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 

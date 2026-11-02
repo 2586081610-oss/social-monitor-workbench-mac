@@ -48,6 +48,8 @@ export interface CreatorUpdate {
   name?: string;
   group_id?: number | null;
   enabled?: boolean;
+  /** 自定义检测间隔（秒，60~2592000）；null=恢复跟随平台默认 */
+  poll_interval_seconds?: number | null;
 }
 
 export interface Creator {
@@ -60,6 +62,11 @@ export interface Creator {
   enabled: boolean;
   last_poll_at: string | null;
   last_work_at: string | null;
+  poll_interval_seconds?: number | null;
+  next_poll_at?: string | null;
+  /** 连续检测失败次数；≥2 前端显示警示 */
+  poll_fail_streak?: number;
+  last_poll_error?: string | null;
   created_at: string;
   updated_at: string;
 }
