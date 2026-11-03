@@ -359,11 +359,69 @@ def _completed_at() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+_RESOLUTION_RE = re.compile(r"Stream #\d+:\d+.*?: Video:.*?\b(\d{2,5})x(\d{2,5})\b")
+
+
+def _probe_video_resolution(path: Path) -> str | None:
+    """用 ffprobe/ffmpeg 探测落盘视频实际分辨率（如 "1920x1080"）；失败返回 None。
+
+    yutto 的 -q 只有"选高档拿低档"的静默降档兜底，这里把真实分辨率留下证据。
+    探测失败绝不影响下载结果（分辨率可见性是旁路观测，不是下载校验）。
+    """
+    probe_bin = shutil.which("ffprobe")
+    if probe_bin:
+        command = [probe_bin, "-v", "error", "-select_streams", "v:0",
+                   "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)]
+    else:
+        # 本机只装了 ffmpeg（tools/bin）：不带输出文件运行时它会打印流信息到
+        # stderr 并以非零码退出，分辨率照样可解析。
+        ffmpeg = shutil.which("ffmpeg") or str(_project_root() / "tools" / "bin" / "ffmpeg")
+        command = [ffmpeg, "-i", str(path)]
+    try:
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = (completed.stdout or "") + (completed.stderr or "")
+    match = _RESOLUTION_RE.search(text)
+    if match:
+        return f"{match.group(1)}x{match.group(2)}"
+    # ffprobe csv 输出形如 "1920,1080"
+    csv_match = re.search(r"(\d{2,5}),(\d{2,5})", completed.stdout or "")
+    if csv_match:
+        return f"{csv_match.group(1)}x{csv_match.group(2)}"
+    return None
+
+
 # 抖音 jiji262 画质档位。480p 是本项目实测的最低含音轨档。
 _JIJI_VIDEO_QUALITY = "480p"
 _JIJI_QUALITY_NOTE = "# 480p 为本项目最低可转写档位\n"
-# B 站 yutto 默认档（16=360P），与设置缺省值一致；读取失败时回退到此值。
-_BILIBILI_DEFAULT_QUALITY = "16"
+# B 站 yutto 默认档（64=720P），与设置缺省值一致；读取失败时回退到此值。
+_BILIBILI_DEFAULT_QUALITY = "64"
+# 需要登录态的最低 B 站档位（64=720P；80=1080P）。低于此档匿名可下。
+_BILIBILI_LOGIN_QUALITY_THRESHOLD = 64
+_BILIBILI_AUTH_COOKIE_KEYS = ("SESSDATA", "bili_jct", "DedeUserID")
+
+
+def _bilibili_inline_auth() -> str | None:
+    """从 platform_cookies.json 组装 yutto --auth 内联串；缺失返回 None（不打印内容）。
+
+    只挑 yutto 认证需要的标准键（SESSDATA/bili_jct/DedeUserID），整段 Cookie
+    里的其他键（buvid 等追踪字段）不传。经 _run_cli 静默执行，auth 串不进日志。
+    """
+    section = _load_platform_cookies().get("bilibili", {})
+    cookie = section.get("cookie", "") if isinstance(section, dict) else ""
+    if not isinstance(cookie, str) or "SESSDATA" not in cookie:
+        return None
+    parts = {}
+    for piece in cookie.split(";"):
+        name, _, value = piece.strip().partition("=")
+        if name in _BILIBILI_AUTH_COOKIE_KEYS and value:
+            parts[name] = value
+    if "SESSDATA" not in parts:
+        return None
+    return "; ".join(f"{k}={v}" for k, v in parts.items())
 
 
 def _runtime_download_quality() -> dict:
@@ -567,15 +625,35 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
             import yutto  # noqa: F401
         except ImportError as exc:
             raise PipelineOfflineError("yutto is not installed") from exc
+        quality = _runtime_download_quality()["bilibili"]
         command = [
             sys.executable, "-m", "yutto", "download", url, "-d", str(media_dir),
-            "-q", _runtime_download_quality()["bilibili"],
+            "-q", quality,
         ]
         configured_auth = os.getenv("BILIBILI_AUTH_FILE", "").strip()
         auth_file = Path(configured_auth).expanduser() if configured_auth else _project_root() / "config" / "yutto_auth.toml"
         skip_auth = os.getenv("BILIBILI_SKIP_AUTH", "").strip().casefold() in {"1", "true", "yes", "on"}
         if auth_file.is_file() and not skip_auth:
+            # 用户显式维护的 auth 文件优先（向后兼容既有配置方式）。
             command += ["--auth-file", str(auth_file)]
+        elif not skip_auth:
+            inline_auth = _bilibili_inline_auth()
+            try:
+                needs_login = int(quality) >= _BILIBILI_LOGIN_QUALITY_THRESHOLD
+            except ValueError:
+                needs_login = False
+            if needs_login:
+                if inline_auth is not None:
+                    # cookie 注入用 --auth 内联（不落盘）：_run_cli 静默执行，auth 串
+                    # 不进日志/异常；高清档（≥720P）依赖它避免被降档。低档匿名可下，
+                    # 不带凭据（最小暴露面）。
+                    command += ["--auth", inline_auth]
+                else:
+                    # 明确可观测的匿名回退：yutto -q 会静默降档，这里必须留痕。
+                    logger.warning(
+                        "bilibili login unavailable; downloading at quality %s anonymously "
+                        "(720P/1080P tiers may be silently downgraded)", quality,
+                    )
         skip_danmaku = os.getenv("BILIBILI_SKIP_DANMAKU", "").strip().casefold() in {"1", "true", "yes", "on"}
         if skip_danmaku:
             command += ["--no-danmaku"]
@@ -733,7 +811,16 @@ def download_with_result(
         written = _new_media_files(media_dir, before_fallback, include_images=include_images)
     if not written:
         raise PipelineOfflineError(f"{platform} downloader produced no newly written original media")
-    result = DownloadResult("downloaded", written, _completed_at())
+    resolution: str | None = None
+    for item in written:
+        if item.media_type == "video":
+            resolution = _probe_video_resolution(item.path)
+            if resolution:
+                # 实际分辨率留痕：对照所选档位可发现平台静默降档
+                # （例如选 1080P 实际拿到 360P）。探测失败不影响下载回执。
+                logger.info("%s downloaded video actual resolution: %s", platform, resolution)
+                break
+    result = DownloadResult("downloaded", written, _completed_at(), resolution)
     logger.info("%s media receipt downloaded %d validated file(s)", platform, len(result.files))
     return result
 

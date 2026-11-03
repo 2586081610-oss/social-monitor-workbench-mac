@@ -1,6 +1,6 @@
 """下载清晰度设置（app_settings 持久化）：B 站 yutto -q / 抖音 jiji video_quality。
 
-默认值与改造前硬编码行为完全一致（B 站 16=360P、抖音 480p）；未设置或
+默认 B 站 64=720P、抖音 480p；未设置或
 非法值一律回退默认，脏值不流向下载器。B 站登录态只报告存在性，绝不回显
 Cookie 内容。
 """
@@ -20,7 +20,7 @@ from app.repositories import app_setting_repo
 BILIBILI_QUALITY_KEY = "download_quality_bilibili"
 DOUYIN_QUALITY_KEY = "download_quality_douyin"
 
-# yutto -q 清晰度代码（代码 → 中文标签）。默认 16=360P 与改造前写死的 -q 16 一致。
+# yutto -q 清晰度代码（代码 → 中文标签）。默认 64=720P（需登录；未登录时 yutto 会静默降档）。
 BILIBILI_QUALITY_OPTIONS: dict[str, str] = {
     "16": "360P（流畅）",
     "32": "480P（标清）",
@@ -33,7 +33,7 @@ DOUYIN_QUALITY_OPTIONS: dict[str, str] = {
     "720p": "720p",
     "1080p": "1080p",
 }
-DEFAULT_BILIBILI_QUALITY = "16"
+DEFAULT_BILIBILI_QUALITY = "64"
 DEFAULT_DOUYIN_QUALITY = "480p"
 
 _CONFIG_KEYS = (BILIBILI_QUALITY_KEY, DOUYIN_QUALITY_KEY)

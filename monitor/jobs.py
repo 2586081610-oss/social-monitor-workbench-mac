@@ -1045,6 +1045,12 @@ def download_and_checkpoint(
         task_repo.upsert(db, work.id, "download", "succeeded", attempts=attempts)
         work.last_error = None
         db.commit()
+        # 实际分辨率留痕（对照清晰度设置可发现平台静默降档；探测失败为 None 不打）。
+        actual_resolution = getattr(result, "video_resolution", None)
+        if actual_resolution:
+            logger.info(
+                "work %s (%s) downloaded at actual resolution %s", work.id, work.platform, actual_resolution
+            )
         _sync_checkpoint_after_commit(entry_id, work.id)
         return _DownloadCheckpoint(media_dir=media_dir, result=result, manifest_path=manifest_path)
     except Exception as exc:  # noqa: BLE001 - preserve safe failure state and leave no receipt
