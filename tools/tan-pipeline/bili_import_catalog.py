@@ -22,10 +22,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-WS = Path(__file__).resolve().parents[1]
-ROOT = Path("/Users/zzboy/Documents/ChatGPT/总控 2/socialmonitor-mac/workbench")
-sys.path.insert(0, str(ROOT / "backend"))
-sys.path.insert(0, str(ROOT))
+from tan_paths import DATA_ROOT, WORKBENCH_ROOT, inject_syspath  # noqa: E402
+
+WS = DATA_ROOT  # 任务数据目录（含 data/ 的工作区根，TAN_DATA_DIR 可覆盖）
+ROOT = WORKBENCH_ROOT  # workbench 仓库根（向上探测，TAN_WORKBENCH 可覆盖）
+inject_syspath()
 
 from app.models import Work  # noqa: E402
 from app.repositories import work_repo  # noqa: E402
