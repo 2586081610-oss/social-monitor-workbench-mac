@@ -1,13 +1,17 @@
 """下载清晰度设置（/api/v1/settings/download-quality + monitor 运行时读取）。
 
 关键约定：
-- 默认值与改造前硬编码行为完全一致：B 站 16（-q 16）、抖音 480p；
+- 默认值：B 站 64=720P（-q 64）、抖音 480p；未设置时 explicit=False；
 - 非法档位 422 拒绝；脏值/读取失败回退默认，不流向下载器；
+- B 站高清档（≥64）自动注入 platform_cookies.json 登录态（--auth 内联），
+  缺失时匿名回退且必须留 warning 日志；低档不带凭据；
 - 抖音 config.yml 的手动合法档位不被默认回退覆盖（仅显式设置才同步）；
+- 新下载视频记录实际分辨率（DownloadResult.video_resolution + 日志）；
 - B 站登录态只报告存在性，不回显 Cookie 内容。
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -43,8 +47,8 @@ def test_get_download_quality_defaults(client, auth_headers, db):
     resp = client.get(QUALITY_URL, headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()["data"]
-    # 默认值 = 改造前硬编码行为（B 站 16=360P、抖音 480p）
-    assert data["bilibili"] == "16" and data["bilibili_explicit"] is False
+    # 默认值 = B 站 64=720P、抖音 480p（未设置 → explicit=False）
+    assert data["bilibili"] == "64" and data["bilibili_explicit"] is False
     assert data["douyin"] == "480p" and data["douyin_explicit"] is False
     assert [opt["value"] for opt in data["bilibili_options"]] == ["16", "32", "64", "80"]
     assert [opt["value"] for opt in data["douyin_options"]] == ["480p", "720p", "1080p"]
@@ -97,7 +101,7 @@ def test_quality_from_raw_falls_back_on_dirty_values():
 
     state = quality_from_raw({BILIBILI_KEY: "999", DOUYIN_KEY: "lowest"})
     assert state == {
-        "bilibili": "16", "douyin": "480p",
+        "bilibili": "64", "douyin": "480p",
         "bilibili_explicit": False, "douyin_explicit": False,
     }
     state = quality_from_raw({BILIBILI_KEY: " 64 ", DOUYIN_KEY: "1080P"})
@@ -112,14 +116,14 @@ def test_read_quality_readonly_never_writes(tmp_path):
 
     missing = tmp_path / "missing.db"
     state = read_quality_readonly(missing)
-    assert state["bilibili"] == "16" and state["douyin"] == "480p"
+    assert state["bilibili"] == "64" and state["douyin"] == "480p"
     assert not missing.exists()
 
     empty = tmp_path / "empty.db"
     sqlite3.connect(empty).close()
     before = empty.stat().st_size
     state = read_quality_readonly(empty)
-    assert state["bilibili"] == "16" and state["douyin"] == "480p"
+    assert state["bilibili"] == "64" and state["douyin"] == "480p"
     assert empty.stat().st_size == before  # 不建表
 
     full = tmp_path / "full.db"
@@ -143,6 +147,8 @@ def _capture_cli(monkeypatch, module) -> list[list[str]]:
 def test_bilibili_command_uses_setting_quality(db, monkeypatch, tmp_path):
     from monitor.pipeline import download
 
+    monkeypatch.setattr(download, "_load_platform_cookies", lambda: {})  # 隔离真实 cookie 文件
+    monkeypatch.setattr(download, "_project_root", lambda: tmp_path)  # 隔离真实 yutto_auth.toml
     _set_quality(db, BILIBILI_KEY, "80")
     try:
         commands = _capture_cli(monkeypatch, download)
@@ -156,11 +162,150 @@ def test_bilibili_command_uses_setting_quality(db, monkeypatch, tmp_path):
 def test_bilibili_quality_falls_back_to_default_without_setting(db, monkeypatch, tmp_path):
     from monitor.pipeline import download
 
+    monkeypatch.setattr(download, "_load_platform_cookies", lambda: {})
+    monkeypatch.setattr(download, "_project_root", lambda: tmp_path)
     _clear_quality_rows(db)
     commands = _capture_cli(monkeypatch, download)
     download._invoke_downloader("bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path)
     command = commands[0]
-    assert command[command.index("-q") + 1] == "16"  # 与改造前 -q 16 一致
+    assert command[command.index("-q") + 1] == "64"  # 未设置时默认 720P
+
+
+# ---------- B 站登录态接入（platform_cookies.json → yutto --auth 内联） ----------
+
+_FAKE_BILIBILI_COOKIE = (
+    "buvid3=synthetic-tracker; SESSDATA=FAKESESSDATAVALUE; "
+    "bili_jct=FAKEJCTVALUE; DedeUserID=123456; unrelated=synthetic"
+)
+
+
+def test_bilibili_high_tier_injects_inline_auth_from_cookies(db, monkeypatch, tmp_path):
+    """≥720P 档 + cookie 含 SESSDATA → 命令行注入 --auth（只挑标准认证键）。"""
+    from monitor.pipeline import download
+
+    monkeypatch.setattr(download, "_load_platform_cookies",
+                        lambda: {"bilibili": {"cookie": _FAKE_BILIBILI_COOKIE}})
+    monkeypatch.setattr(download, "_project_root", lambda: tmp_path)
+    _set_quality(db, BILIBILI_KEY, "80")
+    try:
+        commands = _capture_cli(monkeypatch, download)
+        download._invoke_downloader("bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path)
+        command = commands[0]
+        assert "--auth" in command
+        auth_value = command[command.index("--auth") + 1]
+        assert "SESSDATA=FAKESESSDATAVALUE" in auth_value
+        assert "bili_jct=FAKEJCTVALUE" in auth_value
+        assert "DedeUserID=123456" in auth_value
+        assert "buvid3" not in auth_value and "unrelated" not in auth_value  # 追踪键不传
+    finally:
+        _clear_quality_rows(db)
+
+
+def test_bilibili_high_tier_without_login_warns_and_stays_anonymous(db, monkeypatch, tmp_path, caplog):
+    """≥720P 档但无 cookie → 匿名下载且日志明确警告（不静默降档）。"""
+    import logging as _logging
+
+    from monitor.pipeline import download
+
+    monkeypatch.setattr(download, "_load_platform_cookies", lambda: {})
+    monkeypatch.setattr(download, "_project_root", lambda: tmp_path)
+    _set_quality(db, BILIBILI_KEY, "80")
+    try:
+        commands = _capture_cli(monkeypatch, download)
+        with caplog.at_level(_logging.WARNING, logger="monitor.pipeline.download"):
+            download._invoke_downloader("bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path)
+        command = commands[0]
+        assert "--auth" not in command and "--auth-file" not in command
+        warnings = [r for r in caplog.records if "login unavailable" in r.message]
+        assert warnings, "匿名回退必须留下 warning 日志"
+        assert "SESSDATA" not in caplog.text  # 日志不泄露凭据
+    finally:
+        _clear_quality_rows(db)
+
+
+def test_bilibili_low_tier_does_not_attach_auth(db, monkeypatch, tmp_path):
+    """360P/480P 匿名可下：即使有 cookie 也不注入 --auth（最小暴露面）。"""
+    from monitor.pipeline import download
+
+    monkeypatch.setattr(download, "_load_platform_cookies",
+                        lambda: {"bilibili": {"cookie": _FAKE_BILIBILI_COOKIE}})
+    monkeypatch.setattr(download, "_project_root", lambda: tmp_path)
+    _set_quality(db, BILIBILI_KEY, "32")  # 显式 480P（默认已是 720P，档位需显式设置）
+    try:
+        commands = _capture_cli(monkeypatch, download)
+        download._invoke_downloader("bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path)
+        command = commands[0]
+        assert "--auth" not in command
+    finally:
+        _clear_quality_rows(db)
+
+
+def test_bilibili_explicit_auth_file_takes_priority(db, monkeypatch, tmp_path):
+    """用户显式维护的 yutto_auth.toml 优先于 cookie 注入（向后兼容）。"""
+    from monitor.pipeline import download
+
+    monkeypatch.setattr(download, "_load_platform_cookies",
+                        lambda: {"bilibili": {"cookie": _FAKE_BILIBILI_COOKIE}})
+    monkeypatch.setattr(download, "_project_root", lambda: tmp_path)
+    auth_file = tmp_path / "config" / "yutto_auth.toml"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text("[default]\nSESSDATA = 'another'\n", encoding="utf-8")
+    _set_quality(db, BILIBILI_KEY, "80")
+    try:
+        commands = _capture_cli(monkeypatch, download)
+        download._invoke_downloader("bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path)
+        command = commands[0]
+        assert "--auth-file" in command and "--auth" not in command
+    finally:
+        _clear_quality_rows(db)
+
+
+# ---------- 实际分辨率可见性（ffprobe/ffmpeg 探测） ----------
+
+def test_probe_video_resolution_reads_real_mp4(tmp_path):
+    from tests.test_f2_round6_regressions import real_mp4_bytes
+
+    from monitor.pipeline import download
+
+    video = tmp_path / "sample.mp4"
+    video.write_bytes(real_mp4_bytes())
+    resolution = download._probe_video_resolution(video)
+    # 合成 H.264 视频自带尺寸；ffmpeg 可用时必须解出分辨率（形如 WxH）
+    assert resolution is None or ("x" in resolution and resolution.replace("x", "").isdigit())
+
+
+def test_probe_video_resolution_returns_none_on_garbage(tmp_path):
+    from monitor.pipeline import download
+
+    junk = tmp_path / "garbage.mp4"
+    junk.write_bytes(b"not a video at all" * 32)
+    assert download._probe_video_resolution(junk) is None
+
+
+def test_download_with_result_records_video_resolution(monkeypatch, tmp_path):
+    """新下载的视频文件 → DownloadResult.video_resolution 记录实际分辨率并打日志。"""
+    import logging as _logging
+
+    from monitor.pipeline import download
+    from tests.test_f2_round6_regressions import real_mp4_bytes
+
+    monkeypatch.setattr(download, "_invoke_downloader",
+                        lambda _p, _u, d: (d / "original.mp4").write_bytes(real_mp4_bytes()))
+    monkeypatch.setattr(download, "_probe_video_resolution", lambda _path: "1920x1080")
+
+    records: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record.getMessage())
+    download.logger.addHandler(handler)
+    try:
+        result = download.download_with_result(
+            "bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path / "media",
+        )
+        assert result.disposition == "downloaded"
+        assert result.video_resolution == "1920x1080"
+        assert any("actual resolution: 1920x1080" in m for m in records)
+    finally:
+        download.logger.removeHandler(handler)
 
 
 def test_runtime_download_quality_falls_back_when_read_fails(monkeypatch):
@@ -173,7 +318,7 @@ def test_runtime_download_quality_falls_back_when_read_fails(monkeypatch):
     monkeypatch.setattr(download_quality_service, "read_quality_readonly", boom)
     state = download._runtime_download_quality()
     assert state == {
-        "bilibili": "16", "douyin": "480p",
+        "bilibili": "64", "douyin": "480p",
         "bilibili_explicit": False, "douyin_explicit": False,
     }
 
@@ -254,6 +399,6 @@ def test_dirty_setting_value_never_reaches_downloaders(db, monkeypatch, tmp_path
         commands = _capture_cli(monkeypatch, download)
         download._invoke_downloader("bilibili", "https://www.bilibili.com/video/BV1xx411c7mD", tmp_path)
         command = commands[0]
-        assert command[command.index("-q") + 1] == "16"
+        assert command[command.index("-q") + 1] == "64"
     finally:
         _clear_quality_rows(db)

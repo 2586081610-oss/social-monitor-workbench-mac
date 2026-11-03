@@ -43,7 +43,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # PUT 为设置类接口（如 /api/v1/settings/download-quality）所需；
+    # 缺少它时浏览器预检直接 400，前端保存会误报"无法连接聚合 API"。
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
