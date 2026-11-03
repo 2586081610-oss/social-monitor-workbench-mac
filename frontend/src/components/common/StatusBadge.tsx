@@ -45,6 +45,7 @@ const WORK_META: Record<WorkStatus, WorkBadgeMeta> = {
 const COOKIE_META: Record<CookieStatus, { tone: Tone; icon: LucideIcon }> = {
   OK: { tone: 'success', icon: CheckCircle2 },
   WARN: { tone: 'warning', icon: AlertTriangle },
+  FAIL: { tone: 'danger', icon: XCircle },
   NEEDS_RELOGIN: { tone: 'danger', icon: XCircle },
   UNKNOWN: { tone: 'neutral', icon: Clock },
 };
