@@ -43,6 +43,11 @@ logger = logging.getLogger("monitor.jobs")
 
 RSSHUB_PLATFORMS = ("bilibili", "twitter")
 
+# parse 阶段消费开关：作品进入下载检查点、元数据解析完成时，把登记时留下的
+# parse=pending 任务标为 succeeded（与 single_link._mark_parse_succeeded 同语义）。
+# 默认开启；MONITOR_MARK_PARSE_SUCCEEDED=false 可关闭，回到只登记不消费的旧行为。
+_MARK_PARSE_SUCCEEDED = os.getenv("MONITOR_MARK_PARSE_SUCCEEDED", "true").lower() == "true"
+
 # v0.8 每博主自定义检测间隔：NULL=跟随平台默认（全局轮询间隔）；失败统一 30 分钟重试
 _PLATFORM_DEFAULT_INTERVALS = {
     "bilibili": lambda: settings.poll_rsshub_interval,
@@ -893,6 +898,21 @@ class _DownloadCheckpoint:
     manifest_path: Path | None = None
 
 
+def _consume_parse_task(db: Session, work_id: int) -> None:
+    """消费登记时留下的 parse=pending 任务：元数据解析完成即翻为 succeeded。
+
+    只迁移**已存在的 pending 行**——目录导入等从未登记 parse 的作品保持无行，
+    已 succeeded/failed 的行不动；幂等。可由 MONITOR_MARK_PARSE_SUCCEEDED=false 关闭。
+    不自行 commit：跟随下载检查点的既有提交边界落库（含失败提交），
+    语义与 single_link 一致——下载失败不代表解析没完成。
+    """
+    if not _MARK_PARSE_SUCCEEDED:
+        return
+    task = task_repo.get_by_work_stage(db, work_id, "parse")
+    if task is not None and task.status == "pending":
+        task_repo.upsert(db, work_id, "parse", "succeeded", attempts=(task.attempts or 0) + 1)
+
+
 def download_and_checkpoint(
     db: Session,
     work: Work,
@@ -919,6 +939,7 @@ def download_and_checkpoint(
     # Keep newly checked publication evidence even when the later downloader
     # fails; a cached Work value is never passed back as a fresh collector.
     db.commit()
+    _consume_parse_task(db, work.id)
 
     relative_directory, media_dir = resolve_work_directory(
         work,
