@@ -362,25 +362,58 @@ def _completed_at() -> str:
 # 抖音 jiji262 画质档位。480p 是本项目实测的最低含音轨档。
 _JIJI_VIDEO_QUALITY = "480p"
 _JIJI_QUALITY_NOTE = "# 480p 为本项目最低可转写档位\n"
+# B 站 yutto 默认档（16=360P），与设置缺省值一致；读取失败时回退到此值。
+_BILIBILI_DEFAULT_QUALITY = "16"
 
 
-def _ensure_jiji_config(cfg: Path) -> None:
-    """Generate/upgrade the jiji config without logging a machine-specific path."""
+def _runtime_download_quality() -> dict:
+    """运行时读取下载清晰度设置（app_settings 真只读）。
+
+    返回 {"bilibili", "douyin", "bilibili_explicit", "douyin_explicit"}；
+    未设置/库不可达/任何异常都回退默认档且 explicit=False，保持老行为。
+    档位已在服务层按枚举校验，脏值不会到达下载器。
+    """
+    fallback = {
+        "bilibili": _BILIBILI_DEFAULT_QUALITY,
+        "douyin": _JIJI_VIDEO_QUALITY,
+        "bilibili_explicit": False,
+        "douyin_explicit": False,
+    }
+    try:
+        from app.core.config import settings as backend_settings
+        from app.services.download_quality_service import read_quality_readonly
+
+        state = read_quality_readonly(backend_settings.database_path)
+    except Exception:  # noqa: BLE001 - 设置不可达时保持既有默认行为，不阻断下载
+        return fallback
+    return state or fallback
+
+
+def _ensure_jiji_config(cfg: Path, quality: str = _JIJI_VIDEO_QUALITY, *, enforce: bool = False) -> None:
+    """Generate/upgrade the jiji config without logging a machine-specific path.
+
+    保护语义保持不变：仅在文件缺失、video_quality 缺失或为 lowest 时回写，
+    手动设置的合法档位不被默认值覆盖。enforce=True（前端显式配置了档位）
+    时才把 video_quality 同步为运行时设置值。
+    """
     if not cfg.exists():
         cfg.write_text(
             _JIJI_QUALITY_NOTE
-            + f"video_quality: {_JIJI_VIDEO_QUALITY}\n"
+            + f"video_quality: {quality}\n"
             + "thread: 3\nretry_times: 3\nprogress:\n  quiet_logs: true\n",
             encoding="utf-8",
         )
-        logger.info("created jiji downloader configuration at the default quality")
+        logger.info("created jiji downloader configuration at the configured quality")
         return
     text = cfg.read_text(encoding="utf-8")
     if re.search(r"^video_quality:\s*lowest\s*$", text, re.M):
-        text = re.sub(r"^video_quality:\s*lowest\s*$", f"video_quality: {_JIJI_VIDEO_QUALITY}", text, flags=re.M)
+        text = re.sub(r"^video_quality:\s*lowest\s*$", f"video_quality: {quality}", text, flags=re.M)
         cfg.write_text(text, encoding="utf-8")
     elif "video_quality:" not in text:
-        cfg.write_text(_JIJI_QUALITY_NOTE + f"video_quality: {_JIJI_VIDEO_QUALITY}\n" + text, encoding="utf-8")
+        cfg.write_text(_JIJI_QUALITY_NOTE + f"video_quality: {quality}\n" + text, encoding="utf-8")
+    elif enforce and not re.search(rf"^video_quality:\s*{re.escape(quality)}\s*$", text, re.M):
+        text = re.sub(r"^video_quality:\s*\S+\s*$", f"video_quality: {quality}", text, flags=re.M)
+        cfg.write_text(text, encoding="utf-8")
 
 
 MEDIACRAWLER_PLATFORMS = {"xhs", "douyin", "bilibili", "weibo", "tieba", "zhihu", "kuaishou"}
@@ -513,8 +546,13 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
             raise PipelineOfflineError("Douyin downloader is not configured")
         jiji_dir = Path(jiji_dir_value)
         cfg = jiji_dir / "config.yml"
+        quality_state = _runtime_download_quality()
         try:
-            _ensure_jiji_config(cfg)
+            # 显式配置（enforce）才同步 config.yml；默认回退保持"仅补缺失/lowest"
+            # 的既有保护语义，不覆盖手动设置的合法档位。
+            _ensure_jiji_config(
+                cfg, quality_state["douyin"], enforce=quality_state["douyin_explicit"]
+            )
         except OSError:
             raise PipelineOfflineError("Douyin downloader configuration is unavailable") from None
         _run_cli(
@@ -529,7 +567,10 @@ def _invoke_downloader(platform: str, url: str, media_dir: Path) -> None:
             import yutto  # noqa: F401
         except ImportError as exc:
             raise PipelineOfflineError("yutto is not installed") from exc
-        command = [sys.executable, "-m", "yutto", "download", url, "-d", str(media_dir), "-q", "16"]
+        command = [
+            sys.executable, "-m", "yutto", "download", url, "-d", str(media_dir),
+            "-q", _runtime_download_quality()["bilibili"],
+        ]
         configured_auth = os.getenv("BILIBILI_AUTH_FILE", "").strip()
         auth_file = Path(configured_auth).expanduser() if configured_auth else _project_root() / "config" / "yutto_auth.toml"
         skip_auth = os.getenv("BILIBILI_SKIP_AUTH", "").strip().casefold() in {"1", "true", "yes", "on"}
