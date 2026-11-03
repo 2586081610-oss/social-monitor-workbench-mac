@@ -913,6 +913,82 @@ def _consume_parse_task(db: Session, work_id: int) -> None:
         task_repo.upsert(db, work_id, "parse", "succeeded", attempts=(task.attempts or 0) + 1)
 
 
+def _download_douyin_video(
+    work,
+    media_dir,
+    *,
+    registered_files,
+    allow_browser_fallback: bool,
+):
+    """抖音视频三层下载：jiji 主通道 → F2 API 直取 → 可选浏览器兜底。
+
+    allow_browser_fallback 只约束"打开网页抓流"的浏览器兜底，不再阻断 F2：
+    F2 走 detail 接口 + CDN 直取，不打开作品网页。每层结果单独记日志，
+    最终错误按层标注原因，避免只留下一句笼统的兜底失败文案。
+    """
+    jiji_reason = None
+    f2_reason = None
+    try:
+        result = download.download_with_result(
+            "douyin",
+            work.url,
+            media_dir,
+            registered_files=registered_files,
+            allow_browser_fallback=False,  # 本层只要主通道，兜底由下面分层决定
+        )
+        logger.info("work %s douyin download: jiji 命中", work.id)
+        return result, "monitor.pipeline.download:douyin:jiji"
+    except PipelineOfflineError as exc:
+        jiji_reason = str(exc) or type(exc).__name__
+        logger.warning(
+            "work %s douyin download: jiji 失败（%s）；转 F2 API 直取"
+            "（jiji 子进程输出被 _run_cli 静默，403/登录态问题需看 tools/douyin-downloader 日志）",
+            work.id,
+            jiji_reason,
+        )
+
+    from monitor.pipeline import douyin_video
+
+    try:
+        result = douyin_video.download_f2_video_with_result(
+            work,
+            media_dir,
+            registered_files=registered_files,
+        )
+        logger.info("work %s douyin download: F2 API 命中", work.id)
+        return result, "monitor.pipeline.douyin_video"
+    except Exception as exc:  # noqa: BLE001 - 兜底层异常统一转为安全文案，继续判断下一层
+        f2_reason = str(exc) or type(exc).__name__
+        logger.warning("work %s douyin download: F2 API 失败（%s）", work.id, f2_reason)
+
+    if not allow_browser_fallback:
+        logger.warning("work %s douyin download: 浏览器兜底被策略禁用", work.id)
+        raise PipelineOfflineError(
+            f"douyin download failed: jiji={jiji_reason}; f2={f2_reason}; browser=disabled"
+        )
+
+    logger.warning(
+        "work %s douyin download: 进入浏览器兜底（download_with_result 内部会先重试主通道一次）",
+        work.id,
+    )
+    try:
+        result = download.download_with_result(
+            "douyin",
+            work.url,
+            media_dir,
+            registered_files=registered_files,
+            allow_browser_fallback=True,
+        )
+        logger.info("work %s douyin download: 浏览器兜底命中", work.id)
+        return result, "monitor.pipeline.download:douyin:browser"
+    except PipelineOfflineError as exc:
+        browser_reason = str(exc) or type(exc).__name__
+        logger.warning("work %s douyin download: 浏览器兜底失败（%s）", work.id, browser_reason)
+        raise PipelineOfflineError(
+            f"douyin download failed: jiji={jiji_reason}; f2={f2_reason}; browser={browser_reason}"
+        ) from None
+
+
 def download_and_checkpoint(
     db: Session,
     work: Work,
@@ -985,7 +1061,14 @@ def download_and_checkpoint(
         manifest_path = None
         content_type = str(work.content_type or "video").lower()
         if content_type == "video":
-            try:
+            if work.platform == "douyin":
+                result, download_source = _download_douyin_video(
+                    work,
+                    media_dir,
+                    registered_files=registered_files,
+                    allow_browser_fallback=allow_browser_fallback,
+                )
+            else:
                 result = download.download_with_result(
                     work.platform,
                     work.url,
@@ -994,19 +1077,6 @@ def download_and_checkpoint(
                     allow_browser_fallback=allow_browser_fallback,
                 )
                 download_source = f"monitor.pipeline.download:{work.platform}"
-            except PipelineOfflineError:
-                # 个人来源禁用网页播放兜底：jiji 主路径失败后改用 F2 详情直链直取
-                # （仍是 API/CDN，无网页无播放）。其他来源保持既有行为不变。
-                if allow_browser_fallback or work.platform != "douyin":
-                    raise
-                from monitor.pipeline import douyin_video
-
-                result = douyin_video.download_f2_video_with_result(
-                    work,
-                    media_dir,
-                    registered_files=registered_files,
-                )
-                download_source = "monitor.pipeline.douyin_video"
         elif work.platform == "douyin":
             # 抖音图集：F2 detail 只读接口取图片直链 + CDN 直取，全程不打开/播放
             # 作品网页；失败走 DouyinImageError 的白名单/脱敏文案，如实标记。
