@@ -509,7 +509,7 @@ export default function SettingsPage() {
           </div>
         )}
         <p className="mt-2 text-[11px] text-ink-muted">
-          状态说明：{COOKIE_STATUS_LABEL.OK}＝在线校验通过；{COOKIE_STATUS_LABEL.WARN}＝有会话凭证但网络未打通；{COOKIE_STATUS_LABEL.NEEDS_RELOGIN}＝未登录或凭证失效；{COOKIE_STATUS_LABEL.UNKNOWN}＝响应异常无法判定。
+          状态说明：{COOKIE_STATUS_LABEL.OK}＝在线校验通过；{COOKIE_STATUS_LABEL.WARN}＝有会话凭证但网络未打通；{COOKIE_STATUS_LABEL.FAIL}＝凭据可能有效但采集任务失败（看下方轮询时间与日志）；{COOKIE_STATUS_LABEL.NEEDS_RELOGIN}＝未登录或凭证失效；{COOKIE_STATUS_LABEL.UNKNOWN}＝响应异常无法判定。
         </p>
       </Section>
 

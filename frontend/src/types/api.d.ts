@@ -21,7 +21,7 @@ export type SourceType = 'monitor' | 'like' | 'favorite' | 'manual';
 
 export type TagKind = 'big' | 'small';
 
-export type CookieStatus = 'OK' | 'WARN' | 'NEEDS_RELOGIN' | 'UNKNOWN';
+export type CookieStatus = 'OK' | 'WARN' | 'FAIL' | 'NEEDS_RELOGIN' | 'UNKNOWN';
 
 export type ComponentStatus = 'online' | 'offline' | 'degraded' | 'unknown';
 

@@ -20,7 +20,9 @@ WorkStatus = Literal[
 SourceType = Literal["monitor", "like", "favorite", "manual", "personal_source"]
 TagKind = Literal["big", "small"]
 LexiconAction = Literal["increase", "decrease"]
-CookieStatus = Literal["OK", "WARN", "NEEDS_RELOGIN", "UNKNOWN"]
+# 真实写入方：account_service 在线校验（OK/WARN/NEEDS_RELOGIN/UNKNOWN）、
+# monitor/jobs 采集结果（OK/FAIL，见 monitor/jobs.py _update_cookie）。
+CookieStatus = Literal["OK", "WARN", "FAIL", "NEEDS_RELOGIN", "UNKNOWN"]
 StageName = Literal["parse", "download", "transcribe", "frames", "note"]
 StageStatus = Literal["pending", "running", "succeeded", "failed"]
 

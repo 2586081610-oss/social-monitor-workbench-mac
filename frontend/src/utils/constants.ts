@@ -44,6 +44,7 @@ export const RUNNING_STATUSES: ReadonlySet<WorkStatus> = new Set<WorkStatus>([
 export const COOKIE_STATUS_LABEL: Record<string, string> = {
   OK: '已登录',
   WARN: '疑似有效·网络校验未完成',
+  FAIL: '采集失败',
   NEEDS_RELOGIN: '未登录',
   UNKNOWN: '未校验',
 };
