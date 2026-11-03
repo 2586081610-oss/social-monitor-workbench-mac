@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.errors import not_found
 from app.repositories import task_repo, work_repo
 from app.utils.filename import sanitize_filename
-from app.utils.timeutil import to_date
+from app.utils.timeutil import to_date_local
 
 
 def _creator_name(work) -> str:
@@ -63,8 +63,9 @@ def write_pending_manifest(work, *, target: str | None = None) -> dict:
     pending_dir.mkdir(parents=True, exist_ok=True)
 
     # Keep the existing path naming convention while preserving unknown publication facts.
-    publish_date = to_date(work.published_at) or "unknown"
-    date = to_date(work.published_at) or to_date(work.created_at) or "unknown"
+    # 日期口径：按北京时间（Asia/Shanghai）取日，与网页/CSV 展示一致（AGENTS.md）。
+    publish_date = to_date_local(work.published_at) or "unknown"
+    date = to_date_local(work.published_at) or to_date_local(work.created_at) or "unknown"
     safe_title = sanitize_filename(work.title)
     safe_creator = sanitize_filename(_creator_name(work))
     group = _group_name(work)
