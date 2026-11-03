@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import archive, creators, groups, health, lexicon, link_analyses, monitor, personal_source, summary_targets, tags, unclassified, wechat, works, xhs_comments
+from app.api import settings as settings_api
 from app.core.config import settings
 from app.core.db import init_db
 from app.core.errors import AppError
@@ -98,5 +99,6 @@ app.include_router(lexicon.router)
 app.include_router(health.router)
 app.include_router(monitor.router)
 app.include_router(personal_source.router)
+app.include_router(settings_api.router)
 app.include_router(xhs_comments.router)
 app.include_router(wechat.router)

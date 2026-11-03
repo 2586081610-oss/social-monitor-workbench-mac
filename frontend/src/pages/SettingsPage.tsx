@@ -1,6 +1,6 @@
 /** P8 设置：cookie 状态 + 重新扫码引导 + 自动刷新爬取 + 轮询间隔配置 + API 连接 + 系统健康 + 公众号占位。 */
-import { useState } from 'react';
-import { KeyRound, RefreshCw, Settings2, UserCog } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { KeyRound, MonitorDown, RefreshCw, Settings2, UserCog } from 'lucide-react';
 import { CookieStatusBadge, ToneBadge } from '../components/common/StatusBadge';
 import { ErrorState, LoadingState } from '../components/common/StateViews';
 import Toggle from '../components/common/Toggle';
@@ -13,6 +13,7 @@ import {
   switchAccountCookie,
 } from '../services/health';
 import { getArchivePolicy } from '../services/archive';
+import { getDownloadQuality, putDownloadQuality, type DownloadQuality } from '../services/downloadQuality';
 import { getSummaryTargetsHealth, type SummaryTargetHealth } from '../services/summaryTargets';
 import { useAsyncData, usePolling } from '../hooks/useApi';
 import { useRelogin } from '../state/relogin';
@@ -73,6 +74,7 @@ export default function SettingsPage() {
   const systemQuery = useAsyncData(() => getSystemHealth(), []);
   const archivePolicyQuery = useAsyncData(() => getArchivePolicy(), []);
   const summaryHealthQuery = useAsyncData(() => getSummaryTargetsHealth(), []);
+  const qualityQuery = useAsyncData(() => getDownloadQuality(), []);
   usePolling(cookieQuery.refetch, true, 30000);
   usePolling(summaryHealthQuery.refetch, true, 60000);
 
@@ -114,6 +116,43 @@ export default function SettingsPage() {
 
   const intervalLabel =
     autoMinutes >= 60 && autoMinutes % 60 === 0 ? `${autoMinutes / 60} 小时` : `${autoMinutes} 分钟`;
+
+  // 下载清晰度：设置到达后装入表单（仅一次，避免轮询/重新拉取覆盖编辑中的值）
+  const [bilibiliQuality, setBilibiliQuality] = useState('');
+  const [douyinQuality, setDouyinQuality] = useState('');
+  const [qualityFormLoaded, setQualityFormLoaded] = useState(false);
+  const [qualitySaving, setQualitySaving] = useState(false);
+  const [qualityMsg, setQualityMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    const quality = qualityQuery.data;
+    if (quality && !qualityFormLoaded) {
+      setBilibiliQuality(quality.bilibili);
+      setDouyinQuality(quality.douyin);
+      setQualityFormLoaded(true);
+    }
+  }, [qualityQuery.data, qualityFormLoaded]);
+
+  const saveQuality = async () => {
+    if (!bilibiliQuality || !douyinQuality) return;
+    setQualitySaving(true);
+    setQualityMsg(null);
+    try {
+      const saved: DownloadQuality = await putDownloadQuality({
+        bilibili: bilibiliQuality,
+        douyin: douyinQuality,
+      });
+      setQualityMsg({
+        ok: true,
+        text: `已保存：B 站 ${saved.bilibili_options.find((o) => o.value === saved.bilibili)?.label ?? saved.bilibili}、抖音 ${saved.douyin}。仅对之后的下载生效，已下载文件不会自动重下。`,
+      });
+      qualityQuery.refetch();
+    } catch (e) {
+      setQualityMsg({ ok: false, text: e instanceof Error ? `保存失败：${e.message}` : '保存失败，请稍后重试' });
+    } finally {
+      setQualitySaving(false);
+    }
+  };
 
   // 账号健康：立即检测 / 一键检测 / 切换账号
   const [checkingAll, setCheckingAll] = useState(false);
@@ -261,6 +300,80 @@ export default function SettingsPage() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </Section>
+
+      {/* 下载清晰度：B 站 yutto -q / 抖音 jiji video_quality，存 app_settings，运行时读取 */}
+      <Section title="下载清晰度" desc="作品下载的画质档位（B 站 yutto / 抖音 jiji262）；保存后立即生效于后续下载任务。">
+        {qualityQuery.loading ? (
+          <LoadingState label="读取下载清晰度…" />
+        ) : qualityQuery.error || !qualityQuery.data ? (
+          <ErrorState message={qualityQuery.error?.message ?? '下载清晰度暂不可用'} onRetry={qualityQuery.refetch} />
+        ) : (
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink-secondary" htmlFor="download-quality-bilibili">
+                  哔哩哔哩
+                </label>
+                <select
+                  id="download-quality-bilibili"
+                  value={bilibiliQuality}
+                  disabled={!qualityFormLoaded}
+                  onChange={(e) => setBilibiliQuality(e.target.value)}
+                  className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-primary focus:outline-none disabled:opacity-50"
+                >
+                  {qualityQuery.data.bilibili_options.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] leading-4 text-ink-muted">720P/1080P 需登录；1080P 高码率需大会员。</p>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink-secondary" htmlFor="download-quality-douyin">
+                  抖音
+                </label>
+                <select
+                  id="download-quality-douyin"
+                  value={douyinQuality}
+                  disabled={!qualityFormLoaded}
+                  onChange={(e) => setDouyinQuality(e.target.value)}
+                  className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-primary focus:outline-none disabled:opacity-50"
+                >
+                  {qualityQuery.data.douyin_options.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] leading-4 text-ink-muted">档位越低越可能丢音轨（实测最低可转写档为 480p）。</p>
+              </div>
+            </div>
+            <div
+              className={`rounded-md border px-3 py-2 text-xs leading-5 ${
+                qualityQuery.data.bilibili_login_available
+                  ? 'border-success/30 bg-success-light text-success'
+                  : 'border-warning/30 bg-warning-light text-warning'
+              }`}
+            >
+              {qualityQuery.data.bilibili_login_available
+                ? '已检测到 B 站登录凭据（config/platform_cookies.json）；高清档实际能否下载以登录态有效期与作品权限为准。'
+                : '未配置 B 站登录（config/platform_cookies.json 无 bilibili Cookie），最高只能到 360P；720P 及以上需要登录。'}
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={saveQuality}
+                disabled={qualitySaving || !bilibiliQuality || !douyinQuality}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm text-white transition-colors hover:bg-primary-hover disabled:opacity-50"
+              >
+                <MonitorDown className="h-4 w-4" />
+                {qualitySaving ? '保存中…' : '保存清晰度'}
+              </button>
+              <span className="text-xs text-ink-muted">仅对之后的下载生效，已下载文件不会自动重下。</span>
+            </div>
+            {qualityMsg ? (
+              <p className={`text-sm ${qualityMsg.ok ? 'text-success' : 'text-danger'}`}>{qualityMsg.text}</p>
+            ) : null}
           </div>
         )}
       </Section>
