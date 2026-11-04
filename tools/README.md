@@ -68,6 +68,19 @@
 - **注意事项**：
   - 抖音风控严格，建议使用 Playwright 持久化 profile（见 §5）人工过验证码后复用登录态；
   - 依赖安装：`python -m pip install -r requirements.txt`（如未装）。
+- **登录态是硬前提（实测）**：jiji 通道必须使用浏览器登录导出的 cookies（`.cookies.json`
+  或 `config/cookies.json`），至少包含 `passport_csrf_token`、`odin_tt`、`ttwid`；
+  匿名请求会被 `403 ArgusSecurityPlugin` / `Uifid Not Found` 拦截，且子进程退出码仍为 0、
+  不产出媒体文件，容易误判为"下载成功但没文件"。因此 `monitor/jobs.py` 会先预检：
+  `DOUYIN_DOWNLOADER_DIR` 未设置、目录不存在、cookies 缺失/为空/缺字段任一成立即
+  **跳过 jiji 直接走 F2**（错误文案记为 `jiji=skipped (...)`）。
+- **F2 直取通道**：`monitor/pipeline/douyin_video.py` 用 `config/f2/douyin_cookie.txt`
+  调 aweme/detail 接口取直链并分块下载，不打开作品网页；这是本机（无登录 cookies）的
+  实际可用通道。合并/校验依赖系统 FFmpeg（historically `tools/bin/ffmpeg` 为 Windows 构建，
+  macOS 请装原生 `ffmpeg`/`ffprobe`，分辨率探测优先走 PATH 中的 `ffprobe`）。
+- **FFmpeg/ffprobe 获取方式（macOS）**：`brew install ffmpeg`（含 `ffprobe`），或取 npm 包
+  `@ffprobe-installer/darwin-arm64` 内的二进制放到 `tools/bin/ffprobe`。二进制不入库：
+  `tools/bin/ffprobe` 与 `tools/bin/*.bak` 均在 `.gitignore`。
 
 ---
 

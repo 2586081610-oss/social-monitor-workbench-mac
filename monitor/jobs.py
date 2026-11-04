@@ -913,6 +913,45 @@ def _consume_parse_task(db: Session, work_id: int) -> None:
         task_repo.upsert(db, work_id, "parse", "succeeded", attempts=(task.attempts or 0) + 1)
 
 
+_JIJI_REQUIRED_COOKIE_KEYS = ("passport_csrf_token", "odin_tt", "ttwid")
+
+
+def _jiji_cookie_path(jiji_dir: Path) -> Path | None:
+    """jiji 认可的 cookies 位置：项目根 `.cookies.json` 优先，其次 `config/cookies.json`。"""
+    for candidate in (jiji_dir / ".cookies.json", jiji_dir / "config" / "cookies.json"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _jiji_unavailable_reason() -> str | None:
+    """预检 jiji 通道是否可用：不可用返回原因文案（不含凭据值），可用返回 None。
+
+    jiji（jiji262/douyin-downloader）走浏览器登录态：`.cookies.json` 至少要有
+    passport_csrf_token / odin_tt / ttwid，否则匿名请求会被
+    `403 ArgusSecurityPlugin` 拦住。缺配置时直接跳过，避免每次白跑一次子进程。
+    """
+    raw = os.getenv("DOUYIN_DOWNLOADER_DIR", "").strip()
+    if not raw:
+        return "jiji 未配置 DOUYIN_DOWNLOADER_DIR"
+    jiji_dir = Path(raw).expanduser()
+    if not jiji_dir.is_dir():
+        return f"jiji 目录不存在（{jiji_dir}）"
+    cookie_path = _jiji_cookie_path(jiji_dir)
+    if cookie_path is None:
+        return "jiji 缺少 cookies 文件（需浏览器登录导出 passport_csrf_token/odin_tt/ttwid）"
+    try:
+        cookies = json.loads(cookie_path.read_text())
+    except (OSError, ValueError):
+        return "jiji cookies 文件无法解析"
+    if not isinstance(cookies, dict) or not cookies:
+        return "jiji cookies.json 为空，缺 passport_csrf_token/odin_tt/ttwid"
+    missing = [k for k in _JIJI_REQUIRED_COOKIE_KEYS if not str(cookies.get(k) or "").strip()]
+    if missing:
+        return f"jiji cookies 缺少 {', '.join(missing)}"
+    return None
+
+
 def _download_douyin_video(
     work,
     media_dir,
@@ -920,32 +959,45 @@ def _download_douyin_video(
     registered_files,
     allow_browser_fallback: bool,
 ):
-    """抖音视频三层下载：jiji 主通道 → F2 API 直取 → 可选浏览器兜底。
+    """抖音视频分层下载：jiji 主通道 → F2 API 直取 → 可选浏览器兜底。
 
-    allow_browser_fallback 只约束"打开网页抓流"的浏览器兜底，不再阻断 F2：
-    F2 走 detail 接口 + CDN 直取，不打开作品网页。每层结果单独记日志，
-    最终错误按层标注原因，避免只留下一句笼统的兜底失败文案。
+    jiji 通道依赖浏览器登录导出的 cookies（passport_csrf_token/odin_tt/ttwid），
+    匿名会被 `403 ArgusSecurityPlugin` 挡；F2 通道用 `config/f2/douyin_cookie.txt`
+    经 detail 接口 + CDN 直取，不打开作品网页。因此 jiji 未配置/未登录时直接
+    跳到 F2，并把不可用原因写进日志与最终错误文案（jiji=skipped(...)）。
+
+    allow_browser_fallback 只约束"打开网页抓流"的浏览器兜底，不再阻断 F2。
+    每层结果单独记日志，最终错误按 jiji=/f2=/browser= 分层标注。
     """
-    jiji_reason = None
+    jiji_reason = _jiji_unavailable_reason()
+    jiji_skipped = jiji_reason is not None
     f2_reason = None
-    try:
-        result = download.download_with_result(
-            "douyin",
-            work.url,
-            media_dir,
-            registered_files=registered_files,
-            allow_browser_fallback=False,  # 本层只要主通道，兜底由下面分层决定
-        )
-        logger.info("work %s douyin download: jiji 命中", work.id)
-        return result, "monitor.pipeline.download:douyin:jiji"
-    except PipelineOfflineError as exc:
-        jiji_reason = str(exc) or type(exc).__name__
-        logger.warning(
-            "work %s douyin download: jiji 失败（%s）；转 F2 API 直取"
-            "（jiji 子进程输出被 _run_cli 静默，403/登录态问题需看 tools/douyin-downloader 日志）",
+    if jiji_skipped:
+        logger.info(
+            "work %s douyin download: 跳过 jiji（%s），直接 F2 API 直取",
             work.id,
             jiji_reason,
         )
+        jiji_reason = f"skipped ({jiji_reason})"
+    else:
+        try:
+            result = download.download_with_result(
+                "douyin",
+                work.url,
+                media_dir,
+                registered_files=registered_files,
+                allow_browser_fallback=False,  # 本层只要主通道，兜底由下面分层决定
+            )
+            logger.info("work %s douyin download: jiji 命中", work.id)
+            return result, "monitor.pipeline.download:douyin:jiji"
+        except PipelineOfflineError as exc:
+            jiji_reason = str(exc) or type(exc).__name__
+            logger.warning(
+                "work %s douyin download: jiji 失败（%s）；转 F2 API 直取"
+                "（jiji 子进程输出被 _run_cli 静默，403/登录态问题需看 tools/douyin-downloader 日志）",
+                work.id,
+                jiji_reason,
+            )
 
     from monitor.pipeline import douyin_video
 
@@ -963,8 +1015,9 @@ def _download_douyin_video(
 
     if not allow_browser_fallback:
         logger.warning("work %s douyin download: 浏览器兜底被策略禁用", work.id)
+        skipped_note = " (jiji unavailable→F2 direct)" if jiji_skipped else ""
         raise PipelineOfflineError(
-            f"douyin download failed: jiji={jiji_reason}; f2={f2_reason}; browser=disabled"
+            f"douyin download failed: jiji={jiji_reason}; f2={f2_reason}; browser=disabled{skipped_note}"
         )
 
     logger.warning(

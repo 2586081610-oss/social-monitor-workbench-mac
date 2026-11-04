@@ -232,12 +232,21 @@ def test_existing_work_null_publication_filled(parse_and_ingest, db):
 
 # ---------- §8.8 登记作品可走现有下载链路（mock 下载器，不真实下载） ----------
 
-def test_registered_work_download_path(db, monkeypatch):
+def test_registered_work_download_path(db, monkeypatch, tmp_path):
     from pathlib import Path
 
     from app.models import ArchiveEntry, Task, Work
     from app.utils.timeutil import now_iso
     from monitor import jobs
+
+    # jiji 可用性预检要求 DOUYIN_DOWNLOADER_DIR + 登录 cookies；本测试 mock
+    # 的是主通道 CLI（_invoke_downloader），需让预检通过才会走到它。
+    jiji_dir = tmp_path / "jiji"
+    jiji_dir.mkdir()
+    (jiji_dir / ".cookies.json").write_text(
+        json.dumps({"passport_csrf_token": "c", "odin_tt": "o", "ttwid": "t"})
+    )
+    monkeypatch.setenv("DOUYIN_DOWNLOADER_DIR", str(jiji_dir))
 
     work = Work(
         platform="douyin", external_id="77771", title="来源登记作品",

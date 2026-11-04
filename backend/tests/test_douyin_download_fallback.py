@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +26,21 @@ def _work() -> SimpleNamespace:
     )
 
 
+def _configure_jiji(tmp_path, monkeypatch, cookies: dict | None = None) -> None:
+    """把 DOUYIN_DOWNLOADER_DIR 指向临时目录并写入 cookies（默认登录态完整）。"""
+    jiji_dir = tmp_path / "jiji"
+    jiji_dir.mkdir()
+    payload = cookies if cookies is not None else {
+        "passport_csrf_token": "csrf",
+        "odin_tt": "odin",
+        "ttwid": "ttwid",
+    }
+    (jiji_dir / ".cookies.json").write_text(json.dumps(payload))
+    monkeypatch.setenv("DOUYIN_DOWNLOADER_DIR", str(jiji_dir))
+
+
 def test_primary_failure_then_f2_succeeds_even_when_browser_allowed(tmp_path, monkeypatch):
+    _configure_jiji(tmp_path, monkeypatch)
     calls: list[bool] = []
 
     def _jiji_fails(platform, url, media_dir, *, registered_files, allow_browser_fallback):
@@ -54,6 +69,7 @@ def test_primary_failure_then_f2_succeeds_even_when_browser_allowed(tmp_path, mo
 
 
 def test_f2_failure_reports_each_layer(tmp_path, monkeypatch):
+    _configure_jiji(tmp_path, monkeypatch)
     calls: list[bool] = []
 
     def _sequenced(platform, url, media_dir, *, registered_files, allow_browser_fallback):
@@ -84,6 +100,7 @@ def test_f2_failure_reports_each_layer(tmp_path, monkeypatch):
 
 
 def test_browser_fallback_not_triggered_when_disallowed(tmp_path, monkeypatch):
+    _configure_jiji(tmp_path, monkeypatch)
     calls: list[bool] = []
 
     def _jiji_fails(platform, url, media_dir, *, registered_files, allow_browser_fallback):
@@ -106,3 +123,56 @@ def test_browser_fallback_not_triggered_when_disallowed(tmp_path, monkeypatch):
     message = str(caught.value)
     assert "browser=disabled" in message
     assert calls == [False]  # 没有第二次带 allow_browser_fallback=True 的调用
+
+
+def test_jiji_unconfigured_goes_straight_to_f2(tmp_path, monkeypatch):
+    """DOUYIN_DOWNLOADER_DIR 未设置：不调用 jiji，直接命中 F2。"""
+    monkeypatch.delenv("DOUYIN_DOWNLOADER_DIR", raising=False)
+    jiji_calls: list[bool] = []
+
+    def _jiji_should_not_run(platform, url, media_dir, *, registered_files, allow_browser_fallback):
+        jiji_calls.append(allow_browser_fallback)
+        raise AssertionError("jiji 不可用时不应调用主通道")
+
+    def _f2_ok(work, media_dir, *, registered_files):
+        return object()
+
+    monkeypatch.setattr(download_mod, "download_with_result", _jiji_should_not_run)
+    from monitor.pipeline import douyin_video
+
+    monkeypatch.setattr(douyin_video, "download_f2_video_with_result", _f2_ok)
+
+    jobs._download_douyin_video(
+        _work(), tmp_path, registered_files=None, allow_browser_fallback=False
+    )
+
+    assert jiji_calls == []
+    assert jobs._jiji_unavailable_reason() == "jiji 未配置 DOUYIN_DOWNLOADER_DIR"
+
+
+def test_empty_jiji_cookies_goes_straight_to_f2_and_reports_skip(tmp_path, monkeypatch):
+    """cookies.json 为空：跳过 jiji；F2 失败时错误文案标明跳过原因。"""
+    _configure_jiji(tmp_path, monkeypatch, cookies={})
+    jiji_calls: list[bool] = []
+
+    def _jiji_should_not_run(platform, url, media_dir, *, registered_files, allow_browser_fallback):
+        jiji_calls.append(allow_browser_fallback)
+        raise AssertionError("jiji cookies 为空时不应调用主通道")
+
+    def _f2_fails(work, media_dir, *, registered_files):
+        raise RuntimeError("F2 详情不可用：登录态过期")
+
+    monkeypatch.setattr(download_mod, "download_with_result", _jiji_should_not_run)
+    from monitor.pipeline import douyin_video
+
+    monkeypatch.setattr(douyin_video, "download_f2_video_with_result", _f2_fails)
+
+    with pytest.raises(download_mod.PipelineOfflineError) as caught:
+        jobs._download_douyin_video(
+            _work(), tmp_path, registered_files=None, allow_browser_fallback=False
+        )
+
+    message = str(caught.value)
+    assert jiji_calls == []
+    assert "jiji=skipped (jiji cookies.json 为空" in message
+    assert "browser=disabled (jiji unavailable→F2 direct)" in message
