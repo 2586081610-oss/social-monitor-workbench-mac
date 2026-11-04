@@ -45,15 +45,25 @@ PROMPT_TEMPLATE = """你是「博主监控·AI 笔记工作台」的笔记执行
 任务包：{package_path}（相对当前目录；先读它）
 
 步骤：
-1. 读取任务包 JSON：transcript_path（逐句转写 JSON，含 text 字段）、frames_dir（抽帧清单 frame_manifest.json，可能不存在）、lexicon_hits、expected_output、url/title/blogger。
-2. 素材相对当前目录：转写在 media/<transcript_path>。以转写文本为主依据；有抽帧清单可参考图片名。
-3. 写一篇中文笔记到 expected_output 指定的相对路径（目录不存在就创建）。结构：
-   - frontmatter：work_id / platform / blogger / title / url / date / tags
-   - 正文：一句话摘要 → 要点提炼（3-6 条）→ 值得记录的细节 → 双层标签（#大标签 #小标签）
+1. 读取任务包 JSON：transcript_path（逐句转写 JSON，含 text 字段）、frames_dir（抽帧目录，含 frame_manifest.json）、lexicon_hits、expected_output、url/title/blogger。
+2. 素材相对当前目录：转写在 media/<transcript_path>，帧在 media/<frames_dir>/frames/。以转写为主依据；转写不可用（纯音乐/歌词乱码/空白）时，以画面为主依据。
+3. 逐张打开下面的「读图清单」：用图片查看工具实际看图，不要只读文件名。清单已按「语义/场景帧优先 + 时间轴均匀覆盖」选好；某张模糊或纯黑可跳过，但至少读 8 张（总数不足 8 张则全部读）。{frame_guide}
+4. 画面中的文字必须写进正文（本次 P1 修复点）：标题卡、表格、手写计划、号码、赛事/活动名称、地点、日期、品牌、动作名称、重量与组数，逐条抄录并保留数字和单位；看不清的字用「[?]」标注，不要猜。
+5. 画面与转写冲突时以画面为准并注明；转写没提但画面明确的信息可作为补充写入。某类信息若在所有已读帧中都没有，写「现有 N 张关键帧中未见 XXX」；不要用「无法得知」「未提及」这类绝对结论，除非全部可用帧都确认没有。
+6. 写一篇中文笔记到 expected_output 指定的相对路径（目录不存在就创建）。结构：
+   - frontmatter：来源 / 博主 / 作品（URL）/ 发布 / 分类 / 标签
+   - 正文：一句话摘要 → 内容要点（3-6 条）→ 动作或数据细节 → 金句（有原话才写）→ 适合谁 → 素材说明
+   - 「素材说明」必须写清：转写段数与字数、抽帧总数、本次实读张数（与读图清单一致）、帧来源分布。
    - 素材信息不足就如实写少，绝不编造。
-4. 只允许新建/覆盖这一个 .md 文件，不得改动其他任何文件。
+7. 只允许新建/覆盖这一个 .md 文件，不得改动其他任何文件。
 完成后只输出：DONE <文件路径>
 """
+
+# 笔记侧读帧预算：8–12 张，按总帧数自适应，避免一次读几十张撑爆上下文。
+NOTE_FRAME_MIN = 8
+NOTE_FRAME_DEFAULT = 10
+NOTE_FRAME_MAX = 12
+_SOURCE_ORDER = {"semantic": 0, "scene": 1, "sample": 2, "midpoint": 3, "fallback": 4}
 
 
 @dataclass(frozen=True)
@@ -275,8 +285,135 @@ def note_path_for_api(workspace_root: Path, package: dict[str, Any]) -> str:
         raise ValueError(f"expected_output 不在目标 {target} 的 output 根下") from exc
 
 
-def build_prompt(package_path: Path) -> str:
-    return PROMPT_TEMPLATE.format(package_path=package_path.as_posix())
+def _frame_source(frame: dict[str, Any], fallback: bool) -> str:
+    """帧来源：新清单直接读 source；旧清单按顶层 fallback 推断（非兜底=语义命中帧）。"""
+    source = str(frame.get("source") or "").strip().lower()
+    if source in _SOURCE_ORDER:
+        return source
+    return "fallback" if fallback else "semantic"
+
+
+def note_frame_budget(total: int) -> int:
+    """按总帧数决定实读张数：≤8 全读；≤20 读 10；更多读 12。"""
+    if total <= 0:
+        return 0
+    if total <= NOTE_FRAME_MIN:
+        return total
+    if total <= 20:
+        return NOTE_FRAME_DEFAULT
+    return NOTE_FRAME_MAX
+
+
+def select_note_frames(
+    frames: list[dict[str, Any]], *, fallback: bool = False, limit: int | None = None
+) -> list[dict[str, Any]]:
+    """选帧规则：来源优先级（semantic > scene > sample > midpoint > fallback）→ 同来源按 score → 时间桶各取一张保证覆盖。
+
+    返回按时间排序的帧（最多 limit 张），不改动 manifest。
+    """
+    if not frames:
+        return []
+    limit = min(limit or note_frame_budget(len(frames)), len(frames))
+    if limit <= 0:
+        return []
+    span = max(float(frame.get("time_seconds") or 0.0) for frame in frames)
+    width = max(span, 1.0) / limit
+
+    def score(frame: dict[str, Any]) -> float:
+        raw = frame.get("score")
+        if raw is None:
+            raw = frame.get("confidence")
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.5
+
+    buckets: dict[int, list[dict[str, Any]]] = {}
+    for frame in frames:
+        t = max(0.0, float(frame.get("time_seconds") or 0.0))
+        idx = min(limit - 1, int(t // width))
+        buckets.setdefault(idx, []).append(frame)
+
+    selected: list[dict[str, Any]] = []
+    for idx in sorted(buckets):
+        center = (idx + 0.5) * width
+        chosen = min(
+            buckets[idx],
+            key=lambda frame: (
+                _SOURCE_ORDER[_frame_source(frame, fallback)],
+                -score(frame),
+                abs(float(frame.get("time_seconds") or 0.0) - center),
+            ),
+        )
+        selected.append(chosen)
+
+    # 时间桶有空位时，从剩余帧里按来源/评分补足（不重复选）
+    chosen_ids = {id(frame) for frame in selected}
+    remaining = [frame for frame in frames if id(frame) not in chosen_ids]
+    remaining.sort(
+        key=lambda frame: (_SOURCE_ORDER[_frame_source(frame, fallback)], -score(frame), float(frame.get("time_seconds") or 0.0))
+    )
+    selected.extend(remaining[: max(0, limit - len(selected))])
+    selected.sort(key=lambda frame: float(frame.get("time_seconds") or 0.0))
+    return selected
+
+
+def build_frame_guide(package: dict[str, Any], workspace_root: Path) -> str:
+    """把选中帧写成 prompt 里的读图清单；无清单时明确说明，不伪造。"""
+    frames_dir = str(package.get("frames_dir") or "").replace("\\", "/").strip("/")
+    if not frames_dir:
+        return "\n   本作品没有 frames_dir：无帧可读，正文只依据转写，素材说明写明「无帧可读」。"
+    media_root = Path(workspace_root) / "media"
+    try:
+        from monitor.store.shared_db import settings
+
+        media_root = Path(settings.media_root)
+    except Exception:  # pragma: no cover - 无数据库环境下退回工作区 media
+        pass
+    manifest_path = media_root / frames_dir / "frame_manifest.json"
+    if not manifest_path.is_file():
+        return f"\n   清单缺失：{manifest_path.as_posix()} 不存在，无帧可读，正文只依据转写。"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return f"\n   清单损坏：{manifest_path.as_posix()} 无法解析，无帧可读，正文只依据转写。"
+    frames = payload.get("frames") if isinstance(payload, dict) else None
+    if not isinstance(frames, list) or not frames:
+        return f"\n   清单为空：{manifest_path.as_posix()} 没有帧记录，无帧可读。"
+    fallback = bool(payload.get("fallback")) if isinstance(payload, dict) else False
+    selected = select_note_frames(frames, fallback=fallback)
+    if not selected:
+        return "\n   没有可读帧。"
+    sources: dict[str, int] = {}
+    for frame in selected:
+        source = _frame_source(frame, fallback)
+        sources[source] = sources.get(source, 0) + 1
+    mix = " / ".join(f"{name} {count}" for name, count in sorted(sources.items(), key=lambda kv: _SOURCE_ORDER[kv[0]]))
+    lines = [
+        f"\n   总帧数 {len(frames)}，本次实读 {len(selected)} 张（来源：{mix}）。逐张打开：",
+    ]
+    for frame in selected:
+        # manifest 的 file 是「相对作品媒体目录」的 frames/<name>；frames_dir 已到 frames 层
+        rel = f"{frames_dir}/{Path(str(frame.get('file') or '')).name}"
+        hits = "、".join(str(hit.get("term")) for hit in (frame.get("hits") or []) if isinstance(hit, dict))
+        detail = f"media/{rel} | {float(frame.get('time_seconds') or 0.0):.1f}s | {_frame_source(frame, fallback)}"
+        if frame.get("score") is not None:
+            detail += f" | score={float(frame['score']):.2f}"
+        if hits:
+            detail += f" | 命中: {hits}"
+        lines.append(f"   - {detail}")
+    return "\n".join(lines)
+
+
+def build_prompt(package_path: Path, workspace_root: Path | None = None) -> str:
+    """组装 prompt：读包 + 按规则挑选 8–12 张帧写成读图清单。"""
+    root = Path(workspace_root) if workspace_root is not None else package_path.parents[2]
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        package = {}
+    guide = build_frame_guide(package, root) if isinstance(package, dict) else "\n   任务包无法解析，无帧可读。"
+    return PROMPT_TEMPLATE.format(package_path=package_path.as_posix(), frame_guide=guide)
 
 
 def build_argv(config: DispatcherConfig, prompt: str) -> list[str]:
@@ -357,7 +494,7 @@ def dispatch_one(entry: dict[str, Any], config: DispatcherConfig, workspace_root
 
     out_abs = expected_output_abs(workspace_root, package)
     try:
-        returncode, output = run_executor(config, build_prompt(path), workspace_root)
+        returncode, output = run_executor(config, build_prompt(path, workspace_root), workspace_root)
     except (subprocess.TimeoutExpired, RuntimeError, OSError) as exc:
         returncode, output = -1, f"{type(exc).__name__}: {exc}"
 

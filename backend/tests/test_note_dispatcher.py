@@ -251,3 +251,63 @@ class TestNotePathForApi:
         )
         package = _package(31, target="codex", expected_output="summary_targets/codex/output/a.md")
         assert note_dispatcher.note_path_for_api(workspace, package) == "a.md"
+
+
+class TestNoteFrameSelection:
+    """笔记侧读帧：8–12 张、语义/场景优先、时间轴覆盖。"""
+
+    def test_budget_adapts_to_manifest_size(self):
+        assert note_dispatcher.note_frame_budget(0) == 0
+        assert note_dispatcher.note_frame_budget(5) == 5
+        assert note_dispatcher.note_frame_budget(8) == 8
+        assert note_dispatcher.note_frame_budget(12) == 10
+        assert note_dispatcher.note_frame_budget(60) == 12
+
+    def test_semantic_and_scene_win_over_sample_and_timeline_is_covered(self):
+        frames = [
+            {"file": f"frames/frame_{i:04d}.jpg", "time_seconds": float(i * 10), "source": "sample", "score": 0.6}
+            for i in range(1, 31)
+        ]
+        # 早期两张语义帧（分数不高）必须优先于同段 sample 帧
+        frames[1] = {"file": "frames/frame_0002.jpg", "time_seconds": 10.0, "source": "semantic", "score": 0.55}
+        frames[5] = {"file": "frames/frame_0006.jpg", "time_seconds": 60.0, "source": "scene", "score": 0.7}
+        selected = note_dispatcher.select_note_frames(frames)
+        assert len(selected) == note_dispatcher.note_frame_budget(len(frames)) == 12
+        assert {f["source"] for f in selected} >= {"semantic", "scene"}
+        times = [f["time_seconds"] for f in selected]
+        assert times == sorted(times)
+        # 12 张覆盖 0–290s：相邻间隔不超过约 2.5 个桶宽（保证不是全挤在前半段）
+        assert max(times) >= 240
+
+    def test_legacy_manifest_without_source_uses_fallback_flag(self):
+        frames = [{"file": f"frames/frame_{i:04d}.jpg", "time_seconds": float(i), "hits": []} for i in range(1, 4)]
+        selected = note_dispatcher.select_note_frames(frames, fallback=True, limit=3)
+        assert len(selected) == 3
+        assert all(note_dispatcher._frame_source(f, True) == "fallback" for f in selected)
+
+    def test_build_frame_guide_lists_paths_and_mixed_sources(self, workspace, monkeypatch):
+        from monitor.store.shared_db import settings as shared_settings
+
+        media = workspace / "media"
+        frames_dir = "未分组/测试/frames"
+        (media / frames_dir).mkdir(parents=True)
+        manifest = {
+            "work_id": 12,
+            "fallback": False,
+            "frames": [
+                {"file": f"frames/frame_{i:04d}.jpg", "time_seconds": float(i * 20), "source": "sample", "score": 0.6}
+                for i in range(1, 25)
+            ]
+            + [{"file": "frames/frame_0025.jpg", "time_seconds": 480.0, "source": "semantic", "score": 0.95, "hits": [{"term": "深蹲"}]}],
+        }
+        (media / frames_dir / "frame_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(shared_settings, "media_root", media)
+        guide = note_dispatcher.build_frame_guide({"frames_dir": frames_dir}, workspace)
+        assert "总帧数 25，本次实读 12 张" in guide
+        assert "media/未分组/测试/frames/frame_0025.jpg | 480.0s | semantic" in guide
+        assert "命中: 深蹲" in guide
+
+    def test_build_frame_guide_missing_manifest_is_explicit(self, workspace):
+        guide = note_dispatcher.build_frame_guide({"frames_dir": "未分组/缺失/frames"}, workspace)
+        assert "清单缺失" in guide
+        assert "无帧可读" in guide
