@@ -63,6 +63,11 @@ try:  # 作为脚本运行时 sys.path[0] 是本目录；作为模块导入时�
 except ImportError:  # pragma: no cover - 脚本运行路径
     from monitor.platforms.douyin_personal_source import redact_sensitive_text
 
+try:  # 判型唯一实现：模块导入时走包路径
+    from .douyin_content import infer_content_type
+except ImportError:  # pragma: no cover - 以脚本在 f2-runtime venv 执行时同目录导入
+    from douyin_content import infer_content_type
+
 # 平台返回的 per-item status_code 中已知"需要重新登录"的码（其余码原样上报）
 PAYLOAD_STATUS_LOGIN_EXPIRED = 8
 
@@ -219,7 +224,7 @@ def extract_work(raw_aweme) -> tuple[dict | None, dict | None]:
         return None, {"reason": "missing_identity", "raw_id": ""}
     author = raw_aweme.get("author") if isinstance(raw_aweme.get("author"), dict) else {}
     images = raw_aweme.get("images") if isinstance(raw_aweme.get("images"), list) else None
-    media_type = "image" if images else "video"
+    media_type = infer_content_type(raw_aweme)
     cover_url = None
     if images and isinstance(images[0], dict):
         url_list = images[0].get("url_list")

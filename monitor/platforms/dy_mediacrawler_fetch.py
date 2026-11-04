@@ -14,6 +14,17 @@ _MC_DIR = Path(os.environ.get("MEDIACRAWLER_DIR", "tools/mediacrawler")).resolve
 sys.path.insert(0, str(_MC_DIR))
 os.chdir(_MC_DIR)  # MediaCrawler help.py 相对路径读 libs/*.js
 
+# 判型唯一实现：本文件以脚本方式在 MediaCrawler venv 内执行（workbench 根不在
+# sys.path，按同目录导入），也有测试用 importlib 直接加载（走包路径）。两条路径
+# 都指向同一个 douyin_content，不复制判型逻辑。
+_PLATFORM_DIR = Path(__file__).resolve().parent
+if str(_PLATFORM_DIR) not in sys.path:
+    sys.path.append(str(_PLATFORM_DIR))
+try:
+    from monitor.platforms.douyin_content import infer_content_type  # noqa: E402
+except ImportError:  # 脚本方式执行（MediaCrawler venv）
+    from douyin_content import infer_content_type  # noqa: E402
+
 
 def _iso(ts) -> str | None:
     try:
@@ -98,7 +109,7 @@ async def _fetch(sec_uid: str, count: int) -> list[dict]:
                     "title": aw.get("desc") or "",
                     "url": f"https://www.douyin.com/video/{aid}",
                     "published_at": _iso(aw.get("create_time")),
-                    "content_type": "video",
+                    "content_type": infer_content_type(aw),
                     "cover_url": cover or None,
                 }
             )
