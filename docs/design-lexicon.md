@@ -221,3 +221,20 @@ manifest = write_manifest(work_id, frames, frames_dir,
 
 - `/lexicon` schema 增补：`match_mode` / `window_padding` / `max_frames` / `note`（均可选，默认值见 §2.2）。
 - `frame_manifest.json` 增补：`skipped_windows` / `lexicon_version`（可选字段，向后兼容）。
+
+---
+
+## 10. 抽帧与读帧策略（2026-11-04）
+
+### 10.1 抽帧默认切到 teaching
+
+- **默认值**：`monitor/pipeline/frames.py` 的 `DEFAULT_STRATEGY = "teaching"`（原为 classic）。
+- **teaching 规则**：按片长自适应总帧数（约 25 秒/帧，6–60 帧，总量上限 90）；词库命中窗口逐窗保留；其余按「场景切变（`select='gt(scene,0.30)'`）+ 高熵/低模糊采样」优先填充时间桶，中点兜底；帧间隔不小于 3 秒。
+- **回退方式**：环境变量 `MONITOR_FRAME_STRATEGY=classic`，或 `config/frames.json` 写 `{"strategy": "classic"}`（该目录被 `.gitignore` 忽略，适合本机临时回退）。
+- **兼容性**：`frame_manifest.json` 原字段不变，仅新增顶层 `strategy` 与帧级 `source` / `score`；旧清单/旧后端按宽松读取，不受影响。
+
+### 10.2 笔记侧读帧（`monitor/note_dispatcher.py`）
+
+- 实读 **8–12 张**：总帧数 ≤8 全读，≤20 读 10 张，更多读 12 张。
+- 选帧优先级：`source=semantic > scene > sample > midpoint > fallback`；同来源按 `score` 降序；按时间分桶、每桶至少一张，保证时间轴覆盖。
+- prompt 要求：画面文字必须抄进正文（标题卡/表格/号码/赛事/地点/日期/重量组数）；看不清标 `[?]`；无证据写「现有 N 张关键帧中未见」，不写「无法得知」这类绝对结论。
