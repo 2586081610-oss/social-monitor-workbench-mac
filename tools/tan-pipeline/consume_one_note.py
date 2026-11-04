@@ -123,29 +123,34 @@ def finish(work_id: int, note_file: str) -> None:
 
 
 def dump(work_id: int) -> None:
-    """清洗后的转写全文（去字间空格）+ 帧摘要，供撰写笔记。"""
+    """清洗后的转写全文（去字间空格）+ 笔记 prompt（含 build_prompt 产出的读图清单）。
+
+    读图清单与笔记生成侧同源（monitor.note_dispatcher.build_prompt），
+    按 semantic > scene > sample > fallback 优先级选 8–12 张并分桶覆盖，
+    避免操作员按旧版 dump 只读前 3 张。
+    """
     found = find_package(work_id)
     if not found:
         sys.exit(f"NO PACKAGE for {work_id}")
-    _, pkg = found
+    path, pkg = found
     tp = resolve_media(pkg["transcript_path"])
     data = json.loads(tp.read_text())
     segs = data if isinstance(data, list) else data.get("segments", [])
-    print(f"# {pkg['title']} | {pkg['publish_date']} | {len(segs)}段")
+    print(f"# work_id={work_id} | {pkg['title']} | {pkg['publish_date']} | {len(segs)}段")
+    print(f"# transcript: {tp}")
+    print(f"# frames_dir: {resolve_media(pkg['frames_dir'])}")
     for s in segs:
         t = "".join(str(s.get("text", "")).split())
         if not t:
             continue
         st = int(float(s.get("start", 0)))
         print(f"[{st//60:02d}:{st%60:02d}] {t}")
-    fd = resolve_media(pkg["frames_dir"])
-    manifest = fd / "frame_manifest.json"
-    if manifest.exists():
-        m = json.loads(manifest.read_text())
-        frames = m.get("frames", m if isinstance(m, list) else [])
-        print(f"## frames {len(frames)} fallback={m.get('fallback')}")
-        for f in frames[:16]:
-            print("  ", Path(str(f.get("path", f))).name, str(f.get("timestamp", ""))[:8])
+
+    # 与自动派发同一份 prompt/选帧逻辑，避免两处漂移
+    from monitor.note_dispatcher import build_prompt
+
+    print("=== note prompt（含读图清单，按此清单逐张打开） ===")
+    print(build_prompt(path, ROOT))
 
 
 if __name__ == "__main__":
