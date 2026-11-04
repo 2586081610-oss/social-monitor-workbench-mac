@@ -13,6 +13,7 @@ if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
 
 from app.models import AppSetting, PollLog  # noqa: E402
+from app.services import personal_source_service  # noqa: E402
 from app.utils.timeutil import now_iso  # noqa: E402
 
 SCHEDULE_URL = "/api/v1/personal-source/schedule"
@@ -101,10 +102,16 @@ def test_status_surfaces_last_sync_from_poll_logs(client, auth_headers, db):
             db.commit()
 
 
-def test_manual_sync_requires_runtime_and_cookie(client, auth_headers, db):
-    """运行时/登录态未就绪时，手动同步给出明确校验错误而不是静默失败。"""
+def test_manual_sync_requires_runtime_and_cookie(client, auth_headers, monkeypatch):
+    """运行时/登录态未就绪时，手动同步给出明确校验错误而不是静默失败。
+
+    本机仓库可能已安装 F2 运行时并配置登录态；测试必须显式把两项都置为缺失，
+    否则会真的拉起 ingest 子进程（接口会返回 200）。产品语义是缺任一项即 422。
+    """
+    monkeypatch.setattr(personal_source_service, "_runtime_python_exists", lambda: False)
+    monkeypatch.setattr(personal_source_service, "_cookie_file_set", lambda: False)
     resp = client.post("/api/v1/personal-source/sync", headers=auth_headers)
     body = resp.json()
-    # 测试环境两者皆缺：422 且信息包含缺失项
+    # 两者皆缺：422 且信息包含缺失项（运行时检查在前）
     assert resp.status_code == 422
     assert ("运行时" in body["message"]) or ("登录态" in body["message"])

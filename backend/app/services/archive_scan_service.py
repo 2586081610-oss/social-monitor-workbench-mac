@@ -39,6 +39,19 @@ _MEDIA_EXTENSIONS = {
     ".png", ".qt", ".rm", ".rmvb", ".ts", ".tif", ".tiff", ".vob", ".wav", ".webm",
     ".webp", ".wma", ".wmv",
 }
+# 归档扫描判型只看目录内实际落盘文件的扩展名，不解析媒体容器（目录扫描可能面对
+# 大文件，且后端扫描阶段不依赖 ffmpeg）。这里也不复用
+# monitor/platforms/douyin_content.infer_content_type：那个函数依赖抓取产物里的
+# aweme JSON 字段，无法从本地文件推断。
+_VIDEO_FILE_EXTENSIONS = {
+    ".3g2", ".3gp", ".avi", ".f4v", ".flv", ".m2ts", ".m2v", ".m4v", ".mjpeg",
+    ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".qt", ".rm", ".rmvb",
+    ".ts", ".vob", ".webm", ".wmv",
+}
+_IMAGE_FILE_EXTENSIONS = {
+    ".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png",
+    ".tif", ".tiff", ".webp",
+}
 _DERIVED_DIRS = {
     "frames", "frame", "transcript", "transcripts", "notes", "note",
     "comment_images", "comment-images", "笔记", "转写", "关键帧", "抽帧",
@@ -219,6 +232,21 @@ def _safe_directory_files(
             except OSError:
                 continue
     return sorted(set(media), key=lambda value: (value.casefold(), value))
+
+
+def _content_type_for_media_files(media_files: Sequence[str]) -> str:
+    """按目录内实际存在的媒体文件判定 "video" / "image"。
+
+    同时含视频和图片时以视频为主：归档目录对应一个已下载作品，出现视频文件
+    即说明作品本身是视频，图片通常是封面或附带素材。无法判定（只有音频或
+    未知扩展名）时保守回退 video，与历史扫描结果保持一致。
+    """
+    suffixes = {Path(value).suffix.casefold() for value in media_files}
+    if suffixes & _VIDEO_FILE_EXTENSIONS:
+        return "video"
+    if suffixes & _IMAGE_FILE_EXTENSIONS:
+        return "image"
+    return "video"
 
 
 def build_scan_plan(
@@ -943,7 +971,7 @@ def _entry_metadata(
         "downloaded_at": downloaded,
         "download_time_source": download_source,
         "media_path": directory,
-        "content_type": "video",
+        "content_type": _content_type_for_media_files(media_files),
         "metadata_json": meta,
     }
     publication_provenance = None
