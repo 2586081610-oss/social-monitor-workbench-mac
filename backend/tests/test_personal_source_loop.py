@@ -119,18 +119,21 @@ def test_personal_works_endpoint_pagination_and_filters(client, auth_headers, db
     """作品清单接口：分页、类型/状态过滤、标题搜索（douyin 平台专属）。"""
     from app.models import Work
 
+    # 共享测试库会累积其他用例写入的抖音作品，因此本用例所有断言都用唯一标题前缀
+    # 通过 q 过滤，只针对自己构造的数据，不依赖库内总量。
+    prefix = "分页测试"
     db.add_all([
-        Work(platform="douyin", external_id=f"dy{i:03d}", title=f"测试作品{i}",
+        Work(platform="douyin", external_id=f"pg{i:03d}", title=f"{prefix}作品{i}",
              content_type="video" if i % 2 else "image", published_at=f"2024-0{1 + i % 9}-01",
-             url=f"https://www.douyin.com/video/dy{i:03d}", cover_url=f"https://cover/{i}.jpg", status="NEW")
+             url=f"https://www.douyin.com/video/pg{i:03d}", cover_url=f"https://cover/{i}.jpg", status="NEW")
         for i in range(12)
     ])
-    db.add(Work(platform="douyin", external_id="dydone", title="已完成作品", content_type="video",
-                published_at="2024-05-05", url="https://www.douyin.com/video/dydone", status="DOWNLOADED",
-                media_path="未分组/dydone/video.mp4"))
+    db.add(Work(platform="douyin", external_id="pgdone", title=f"{prefix}已完成作品", content_type="video",
+                published_at="2024-05-05", url="https://www.douyin.com/video/pgdone", status="DOWNLOADED",
+                media_path="未分组/pgdone/video.mp4"))
     db.commit()
 
-    resp = client.get("/api/v1/personal-source/works?limit=5&offset=0", headers=auth_headers)
+    resp = client.get(f"/api/v1/personal-source/works?q={prefix}&limit=5&offset=0", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["total"] == 13
@@ -140,19 +143,19 @@ def test_personal_works_endpoint_pagination_and_filters(client, auth_headers, db
         assert field in first
 
     # 类型过滤
-    resp = client.get("/api/v1/personal-source/works?content_type=image", headers=auth_headers)
+    resp = client.get(f"/api/v1/personal-source/works?q={prefix}&content_type=image", headers=auth_headers)
     data = resp.json()["data"]
     assert data["total"] == 6
     assert all(item["content_type"] == "image" for item in data["items"])
 
     # 状态过滤 + 媒体路径
-    resp = client.get("/api/v1/personal-source/works?status=DOWNLOADED", headers=auth_headers)
+    resp = client.get(f"/api/v1/personal-source/works?q={prefix}&status=DOWNLOADED", headers=auth_headers)
     data = resp.json()["data"]
     assert data["total"] == 1
     assert data["items"][0]["media_path"].endswith("video.mp4")
 
     # 标题搜索
-    resp = client.get("/api/v1/personal-source/works?q=已完成", headers=auth_headers)
+    resp = client.get(f"/api/v1/personal-source/works?q={prefix}已完成", headers=auth_headers)
     assert resp.json()["data"]["total"] == 1
 
 

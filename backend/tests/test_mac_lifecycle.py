@@ -130,7 +130,13 @@ def test_delayed_interpreter_exec_does_not_record_wrapper_identity(rig):
     python = root / '.venv/bin/python'
     payload = python.with_name('service.py')
     payload.write_text(python.read_text())
-    python.write_text('#!/bin/sh\nsleep 2\nexec /usr/bin/env python3 "$(dirname "$0")/service.py" "$@"\n')
+    # 用绝对解释器路径而非 /usr/bin/env python3：macOS 的 system python3 会在启动后
+    # 再 exec 到 Python.app，导致 ps 中的 command 在身份记录后再次变化，与本用例
+    # 要验证的「延迟 exec 不记录 wrapper 身份」无关，会造成环境相关的假失败。
+    interpreter = Path(sys.executable).resolve()
+    python.write_text(
+        f'#!/bin/sh\nsleep 2\nexec {interpreter} "$(dirname "$0")/service.py" "$@"\n'
+    )
     started = run(root, env, 'start_all.sh')
     assert started.returncode == 0, started.stdout + started.stderr
     assert len(list(captures.glob('*.json'))) == 2
