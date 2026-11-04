@@ -30,6 +30,7 @@ inject_syspath()
 
 from app.models import Work  # noqa: E402
 from app.repositories import work_repo  # noqa: E402
+from monitor.platforms.douyin_content import infer_content_type  # noqa: E402
 from monitor.store.shared_db import SessionLocal, init_db  # noqa: E402
 
 DATA = WS / "data"
@@ -79,7 +80,7 @@ def import_douyin(db) -> int:
             "url": f"https://www.douyin.com/video/{aid}",
             "creator_id": DOUYIN_CREATOR_ID,
             "source_type": "monitor",
-            "content_type": "image" if a.get("images") else "video",
+            "content_type": infer_content_type(a),
             "cover_url": ((a.get("video") or {}).get("cover") or {}).get("url_list", [None])[0],
             "published_at": epoch_iso(a.get("create_time") or 0),
             "published_time_source": "douyin_api_createtime",
@@ -174,8 +175,8 @@ def select_top_douyin(db, top: int = 10, include_images: bool = False,
     include_images=True 时与视频同口径参选并以 content_type 区分。
     """
     awemes = _douyin_awemes(pages_dir)
-    videos = [(aid, a) for aid, a in awemes.items() if not a.get("images")]
-    images = [(aid, a) for aid, a in awemes.items() if a.get("images")]
+    videos = [(aid, a) for aid, a in awemes.items() if infer_content_type(a) == "video"]
+    images = [(aid, a) for aid, a in awemes.items() if infer_content_type(a) == "image"]
     pool = videos + images if include_images else videos
 
     entries = [
@@ -198,7 +199,7 @@ def select_top_douyin(db, top: int = 10, include_images: bool = False,
             "favorite": meta["favorite"],  # 抖音 collect_count
             "like": meta["like"],          # 抖音 digg_count
             "duration_sec": int((a.get("video") or {}).get("duration") or 0) // 1000,
-            "content_type": "image" if a.get("images") else "video",
+            "content_type": infer_content_type(a),
         })
     missing = [i for i in items if i["work_id"] is None]
     skipped_images = [
