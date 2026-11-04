@@ -1398,6 +1398,13 @@ def test_personal_video_uses_f2_direct_after_jiji_failure(db, monkeypatch, clean
     monkeypatch.setenv("F2_DOUYIN_COOKIE_FILE", str(tmp_path / "cookie.txt"))
     (tmp_path / "cookie.txt").write_text("sessionid=synthetic", encoding="utf-8")
     monkeypatch.setenv("F2_RUNTIME_DIR", str(_make_fake_runtime(tmp_path)))
+    # 本测试模拟"jiji 已配置但失败→F2"：需要预检通过，才会真正调用 mock 的主通道。
+    jiji_dir = tmp_path / "jiji"
+    jiji_dir.mkdir()
+    (jiji_dir / ".cookies.json").write_text(
+        json.dumps({"passport_csrf_token": "c", "odin_tt": "o", "ttwid": "t"})
+    )
+    monkeypatch.setenv("DOUYIN_DOWNLOADER_DIR", str(jiji_dir))
 
     calls: list[str] = []
 
