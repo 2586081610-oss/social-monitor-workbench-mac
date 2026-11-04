@@ -67,6 +67,8 @@ tools/rsshub/
 tools/bin/*.exe
 tools/bin/*.dll
 tools/bin/ffmpeg
+tools/bin/ffprobe
+tools/bin/*.bak
 tools/ffmpeg-exe/
 
 # Mac 适配：运行态与隔离沙箱（脚本生成，勿入库）
