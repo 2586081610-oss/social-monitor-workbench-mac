@@ -34,6 +34,7 @@ from app.utils.timeutil import now_iso, parse_iso  # noqa: E402
 
 from monitor.pipeline import download, frames, notify, transcribe  # noqa: E402
 from monitor.pipeline.download import PipelineOfflineError  # noqa: E402
+from monitor.pipeline.paths import ascii_work_copy, sweep_stale_work_dirs  # noqa: E402
 from monitor.platforms.douyin_cdp import DouyinCDPSession  # noqa: E402
 from monitor.platforms.douyin_mediacrawler import DouyinMediaCrawlerAdapter  # noqa: E402
 from monitor.platforms.rsshub import RSSHubError, RSSHubRouterAdapter  # noqa: E402
@@ -1291,6 +1292,8 @@ def _process_work(
 
     ``allow_browser_fallback`` 透传给下载检查点；None 按作品 source_type 推断。
     """
+    # 兜底回收历史残留副本（进程被强杀等 finally 未执行的路径）
+    sweep_stale_work_dirs()
     content_type = work.content_type or "video"
     checkpoint = download_and_checkpoint(db, work, allow_browser_fallback=allow_browser_fallback)
     if content_type != "video":
@@ -1323,16 +1326,18 @@ def _process_work(
     transcribe_task = task_repo.upsert(db, work.id, "transcribe", "running", attempts=1)
     transcribe_task.error = None
     transcript_dir = media_dir / "transcript"
-    transcript_path = transcribe.transcribe(video_path, transcript_dir)
-    work.transcript_path = relative_path_from_root("media", str(transcript_path))
-    task_repo.upsert(db, work.id, "transcribe", "succeeded", attempts=1)
+    # 转写与抽帧共用同一份 ASCII 工作副本；退出时（含异常/中断）统一删除临时副本
+    with ascii_work_copy(video_path):
+        transcript_path = transcribe.transcribe(video_path, transcript_dir)
+        work.transcript_path = relative_path_from_root("media", str(transcript_path))
+        task_repo.upsert(db, work.id, "transcribe", "succeeded", attempts=1)
 
-    work.status = "FRAME_EXTRACTING"
-    frame_task = task_repo.upsert(db, work.id, "frames", "running", attempts=1)
-    frame_task.error = None
-    manifest_path = run_frames_stage(db, work, video_path, media_dir / "frames")
-    work.frame_manifest_path = relative_path_from_root("media", str(manifest_path))
-    task_repo.upsert(db, work.id, "frames", "succeeded", attempts=1)
+        work.status = "FRAME_EXTRACTING"
+        frame_task = task_repo.upsert(db, work.id, "frames", "running", attempts=1)
+        frame_task.error = None
+        manifest_path = run_frames_stage(db, work, video_path, media_dir / "frames")
+        work.frame_manifest_path = relative_path_from_root("media", str(manifest_path))
+        task_repo.upsert(db, work.id, "frames", "succeeded", attempts=1)
 
     work.status = "NOTE_GENERATING"
     if write_pending:

@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from monitor.pipeline.download import PipelineOfflineError
-from monitor.pipeline.paths import ensure_ascii_work_copy, retry_write_text
+from monitor.pipeline.paths import ascii_work_copy, retry_write_text
 
 logger = logging.getLogger("monitor.pipeline.transcribe")
 
@@ -131,50 +131,51 @@ def transcribe(video_path: str, out_dir: Path) -> str:
           "text": "全文拼接"
         }
     """
-    # 路径规范化：非 ASCII（中文/空格/问号）路径先复制到 media/_work/{hash}/ 再处理
-    work_path, original = ensure_ascii_work_copy(video_path)
-    source = original or work_path
-    if not Path(work_path).exists():
-        # 不带本机路径：该文案会进入 works.last_error / 任务错误 / 日志
-        raise PipelineOfflineError("转写输入文件不存在（可能已被清理或下载不完整）")
+    # 路径规范化：非 ASCII（中文/空格/问号）路径先复制到 media/_work/{hash}/ 再处理。
+    # with 退出时（含转写异常/中断）删除该副本；与抽帧嵌套时由最外层统一清理。
+    with ascii_work_copy(video_path) as (work_path, original):
+        source = original or work_path
+        if not Path(work_path).exists():
+            # 不带本机路径：该文案会进入 works.last_error / 任务错误 / 日志
+            raise PipelineOfflineError("转写输入文件不存在（可能已被清理或下载不完整）")
 
-    engine = _get_engine()
-    out_dir.mkdir(parents=True, exist_ok=True)
+        engine = _get_engine()
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("transcribing: %s (work=%s)", source, work_path)
-    t0 = time.time()
-    # pred_timestamp=True：paraformer 产出逐字符时间戳（result["timestamp"]）；
-    # sentence_timestamp=True：据此切分句级时间戳（sentence_info）。
-    # 漏传 pred_timestamp 会触发 design-timestamps §4.4 坑#1：
-    # "punctuation timestamps could not be aligned" → 退化为 VAD 段（30s 粒度），F-1。
-    res = engine.generate(
-        input=work_path,
-        cache={},
-        pred_timestamp=True,
-        sentence_timestamp=True,
-        batch_size_s=300,
-    )
-    elapsed = time.time() - t0
-    logger.info("transcribe done in %.1fs", elapsed)
+        logger.info("transcribing: %s (work=%s)", source, work_path)
+        t0 = time.time()
+        # pred_timestamp=True：paraformer 产出逐字符时间戳（result["timestamp"]）；
+        # sentence_timestamp=True：据此切分句级时间戳（sentence_info）。
+        # 漏传 pred_timestamp 会触发 design-timestamps §4.4 坑#1：
+        # "punctuation timestamps could not be aligned" → 退化为 VAD 段（30s 粒度），F-1。
+        res = engine.generate(
+            input=work_path,
+            cache={},
+            pred_timestamp=True,
+            sentence_timestamp=True,
+            batch_size_s=300,
+        )
+        elapsed = time.time() - t0
+        logger.info("transcribe done in %.1fs", elapsed)
 
-    if not res:
-        raise PipelineOfflineError("转写结果为空")
+        if not res:
+            raise PipelineOfflineError("转写结果为空")
 
-    item = res[0]
-    segments, has_ts = _extract_segments(item, fallback_end=elapsed)
-    full_text = _clean_text(item.get("text")) or "".join(seg["text"] for seg in segments).strip()
+        item = res[0]
+        segments, has_ts = _extract_segments(item, fallback_end=elapsed)
+        full_text = _clean_text(item.get("text")) or "".join(seg["text"] for seg in segments).strip()
 
-    # 提取文件名（去除扩展名）作为转写稿名
-    stem = Path(video_path).stem
-    out_path = out_dir / f"{stem}.json"
-    doc = {
-        "source": source,
-        "engine": _ENGINE_NAME,
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "timestamps": "sentence" if has_ts else "none",
-        "segments": segments,
-        "text": full_text,
-    }
-    retry_write_text(out_path, json.dumps(doc, ensure_ascii=False, indent=2))
-    logger.info("transcript saved: %s", out_path)
-    return str(out_path)
+        # 提取文件名（去除扩展名）作为转写稿名
+        stem = Path(video_path).stem
+        out_path = out_dir / f"{stem}.json"
+        doc = {
+            "source": source,
+            "engine": _ENGINE_NAME,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timestamps": "sentence" if has_ts else "none",
+            "segments": segments,
+            "text": full_text,
+        }
+        retry_write_text(out_path, json.dumps(doc, ensure_ascii=False, indent=2))
+        logger.info("transcript saved: %s", out_path)
+        return str(out_path)

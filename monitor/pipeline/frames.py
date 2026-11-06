@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from monitor.pipeline.paths import ensure_ascii_work_copy, retry_write_text
+from monitor.pipeline.paths import ascii_work_copy, ensure_ascii_work_copy, retry_write_text
 
 logger = logging.getLogger("monitor.pipeline.frames")
 
@@ -177,33 +177,33 @@ def extract_frames_classic(video_path: str, windows: list[dict], out_dir: Path) 
     """旧策略：每窗口默认 1 帧，increase 按权重增帧 / decrease 减帧（下限 1）。
 
     路径规范化：中文/空格/问号路径先复制到 media/_work/{hash}/ 再喂 ffmpeg
-    （与转写同根因，规避 Windows 子进程非 ASCII 路径失败）。
+    （与转写同根因，规避 Windows 子进程非 ASCII 路径失败）；with 退出时删除副本。
     """
-    work_path, _ = ensure_ascii_work_copy(video_path)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    frames = []
-    idx = 1
-    for window in windows:
-        count = _frame_count_for_window(window)
-        span = max(window["end"] - window["start"], 1.0)
-        for k in range(count):
-            t = window["start"] + span * (k + 0.5) / count
-            name = f"frame_{idx:04d}.jpg"
-            if _extract_one(work_path, t, out_dir / name):
-                frames.append(
-                    {
-                        "file": f"frames/{name}",
-                        "time_seconds": round(t, 2),
-                        "window_start": round(window["start"], 2),
-                        "window_end": round(window["end"], 2),
-                        "hits": window["hits"],
-                        "confidence": 0.9,
-                    }
-                )
-                idx += 1
-            else:
-                logger.warning("ffmpeg frame extract failed at %s", t)
-    return frames
+    with ascii_work_copy(video_path) as (work_path, _):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frames = []
+        idx = 1
+        for window in windows:
+            count = _frame_count_for_window(window)
+            span = max(window["end"] - window["start"], 1.0)
+            for k in range(count):
+                t = window["start"] + span * (k + 0.5) / count
+                name = f"frame_{idx:04d}.jpg"
+                if _extract_one(work_path, t, out_dir / name):
+                    frames.append(
+                        {
+                            "file": f"frames/{name}",
+                            "time_seconds": round(t, 2),
+                            "window_start": round(window["start"], 2),
+                            "window_end": round(window["end"], 2),
+                            "hits": window["hits"],
+                            "confidence": 0.9,
+                        }
+                    )
+                    idx += 1
+                else:
+                    logger.warning("ffmpeg frame extract failed at %s", t)
+        return frames
 
 
 def _extract_one(work_path: str, t: float, out_path: Path) -> bool:
@@ -491,20 +491,20 @@ def extract_frames_teaching(
     manifest 字段与 classic 完全兼容，额外 source/score 仅用于追溯与对照。
     """
     cfg = (settings or load_settings())["teaching"]
-    work_path, _ = ensure_ascii_work_copy(video_path)
-    duration = video_duration_seconds(work_path)
-    if not duration:
-        logger.info("teaching 策略无法获取视频时长：%s", video_path)
-        return []
-    cuts = scan_scene_cuts(work_path, cfg)
-    samples = scan_frame_quality(work_path, cfg)
-    budget = frame_budget(duration, cfg)
-    selections = select_teaching_windows(duration, windows, cuts, samples, cfg, budget)
-    logger.info(
-        "teaching select: duration=%.1fs budget=%d scene_cuts=%d samples=%d selected=%d",
-        duration, budget, len(cuts), len(samples), len(selections),
-    )
-    return extract_selected_frames(work_path, selections, out_dir)
+    with ascii_work_copy(video_path) as (work_path, _):
+        duration = video_duration_seconds(work_path)
+        if not duration:
+            logger.info("teaching 策略无法获取视频时长：%s", video_path)
+            return []
+        cuts = scan_scene_cuts(work_path, cfg)
+        samples = scan_frame_quality(work_path, cfg)
+        budget = frame_budget(duration, cfg)
+        selections = select_teaching_windows(duration, windows, cuts, samples, cfg, budget)
+        logger.info(
+            "teaching select: duration=%.1fs budget=%d scene_cuts=%d samples=%d selected=%d",
+            duration, budget, len(cuts), len(samples), len(selections),
+        )
+        return extract_selected_frames(work_path, selections, out_dir)
 
 
 def write_manifest(
