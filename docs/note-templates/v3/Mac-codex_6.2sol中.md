@@ -1,4 +1,6 @@
-# 健身训练笔记 v3
+# Mac-codex_6.2sol中 · 健身训练笔记 v3
+
+本页是 Mac-codex_6.2sol中 提交的健身专用版本。Trae 的 80/20 模板入口见 [Trae 版本](README.md)。
 
 开始前阅读[通用规范](00-通用规范.md)、[分类路由](01-分类路由.md)及[证据核验](02-证据核验.md)。交付物是同一份笔记的 `note.md` 与 `note.json`，使用[数据契约](schemas/note-v3.schema.json)。Markdown 的 [YAML 头](schemas/frontmatter.yaml)由 JSON 元数据生成。原片位置用毫秒，图文位置用原始序号。结构化主张、训练表和专题模块引用同一套证据编号。
 
