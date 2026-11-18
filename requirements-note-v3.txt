@@ -1,0 +1,3 @@
+# Optional dependencies for the standalone fitness note generator.
+jsonschema>=4.18,<5
+PyYAML>=6,<7

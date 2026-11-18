@@ -1,0 +1,1068 @@
+{
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "3.0"
+        },
+        "note_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "media_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "platform": {
+              "type": "string",
+              "minLength": 1
+            },
+            "author": {
+              "type": "string",
+              "minLength": 1
+            },
+            "url": {
+              "type": "string",
+              "pattern": "^https?://"
+            },
+            "published_at": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "duration_seconds": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "local_media_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "platform",
+            "author",
+            "url",
+            "published_at",
+            "duration_seconds",
+            "local_media_id"
+          ],
+          "additionalProperties": false
+        },
+        "classification": {
+          "type": "object",
+          "properties": {
+            "primary_type": {
+              "enum": [
+                "口播理论",
+                "动作教学",
+                "跟练",
+                "图文收藏"
+              ]
+            },
+            "topics": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "modules": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "训练计划",
+                  "运动营养"
+                ]
+              },
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "primary_type",
+            "topics",
+            "modules"
+          ],
+          "additionalProperties": false
+        },
+        "processing": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "enum": [
+                "quick",
+                "standard",
+                "deep"
+              ]
+            },
+            "transcript_status": {
+              "enum": [
+                "pending",
+                "done",
+                "unavailable"
+              ]
+            },
+            "frame_status": {
+              "enum": [
+                "pending",
+                "done",
+                "unavailable"
+              ]
+            },
+            "evidence_status": {
+              "enum": [
+                "not_checked",
+                "partial",
+                "checked"
+              ]
+            },
+            "note_status": {
+              "enum": [
+                "draft",
+                "reviewed",
+                "published"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "transcript_status",
+            "frame_status",
+            "evidence_status",
+            "note_status"
+          ],
+          "additionalProperties": false
+        },
+        "version": {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "source_hash": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "input_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "updated_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "revision",
+            "source_hash",
+            "input_hash",
+            "updated_at"
+          ],
+          "additionalProperties": false
+        },
+        "relations": {
+          "type": "object",
+          "properties": {
+            "related_media_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "related_note_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "knowledge_topic_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "related_media_ids",
+            "related_note_ids",
+            "knowledge_topic_ids"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "note_id",
+        "media_id",
+        "title",
+        "source",
+        "classification",
+        "processing",
+        "version",
+        "relations"
+      ],
+      "additionalProperties": false
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claim_type": {
+            "enum": [
+              "technique",
+              "parameter",
+              "mechanism",
+              "effect",
+              "risk",
+              "nutrition",
+              "other"
+            ]
+          },
+          "origin": {
+            "$ref": "#/$defs/origin"
+          },
+          "source_evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[vsqdu][1-9][0-9]*$"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "verification": {
+            "type": "object",
+            "properties": {
+              "level": {
+                "enum": [
+                  "V0",
+                  "V1",
+                  "V2"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "source_confirmed",
+                  "needs_review"
+                ]
+              },
+              "external_checked": {
+                "type": "boolean"
+              },
+              "external_status": {
+                "enum": [
+                  "not_checked",
+                  "supported",
+                  "partly_supported",
+                  "conflict",
+                  "insufficient"
+                ]
+              },
+              "evidence_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[vsqdu][1-9][0-9]*$"
+                },
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "level",
+              "status",
+              "external_checked",
+              "external_status",
+              "evidence_ids"
+            ],
+            "additionalProperties": false
+          },
+          "knowledge_topic_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "needs_review": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "claim_id",
+          "media_id",
+          "statement",
+          "claim_type",
+          "origin",
+          "source_evidence_ids",
+          "verification",
+          "knowledge_topic_ids",
+          "needs_review"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[vsqdu][1-9][0-9]*$"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1
+          },
+          "channel": {
+            "enum": [
+              "transcript",
+              "frame",
+              "clip",
+              "image",
+              "ocr",
+              "caption",
+              "research",
+              "search"
+            ]
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/origin"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "citation": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "author": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "year": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "venue": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https?://"
+                  },
+                  "doi": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "author",
+                  "year",
+                  "title",
+                  "venue",
+                  "url",
+                  "doi"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "search": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "service": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "date": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  "limitations": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "query",
+                  "service",
+                  "date",
+                  "limitations"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "strength": {
+            "anyOf": [
+              {
+                "enum": [
+                  "strong",
+                  "moderate",
+                  "weak",
+                  "conflicting"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "detail",
+          "channel",
+          "origin",
+          "citation",
+          "search",
+          "strength",
+          "limits"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "training_sequence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/trainingRow"
+      }
+    },
+    "training_plan": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "goal": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "conditions": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "frequency": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "equipment": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "session_length": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "progression": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "adjustments": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "days": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "day": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "muscle_groups": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "uniqueItems": true
+                  },
+                  "exercises": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/trainingRow"
+                    }
+                  }
+                },
+                "required": [
+                  "day",
+                  "muscle_groups",
+                  "exercises"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "goal",
+            "conditions",
+            "frequency",
+            "equipment",
+            "session_length",
+            "progression",
+            "adjustments",
+            "days"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sports_nutrition": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "item": {
+                "type": "string",
+                "minLength": 1
+              },
+              "amount": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "conditions": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "author_basis": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limitations": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "evidence_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[vsqdu][1-9][0-9]*$"
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "item",
+              "amount",
+              "unit",
+              "conditions",
+              "author_basis",
+              "limitations",
+              "evidence_ids"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "corrections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "enum": [
+              "transcript",
+              "ocr"
+            ]
+          },
+          "original": {
+            "type": "string",
+            "minLength": 1
+          },
+          "corrected": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 1
+          },
+          "origin": {
+            "$ref": "#/$defs/origin"
+          }
+        },
+        "required": [
+          "channel",
+          "original",
+          "corrected",
+          "basis",
+          "origin"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "knowledge_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "supports",
+              "supplements",
+              "conflicts",
+              "updates"
+            ]
+          },
+          "note_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claim_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "related_claim_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "kind",
+          "note_id",
+          "claim_id",
+          "related_claim_id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "review_items": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "metadata",
+    "claims",
+    "evidence",
+    "training_sequence",
+    "training_plan",
+    "sports_nutrition",
+    "corrections",
+    "knowledge_links",
+    "review_items"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fitness note v3",
+  "$defs": {
+    "origin": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "video",
+            "post"
+          ]
+        },
+        "start_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "end_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transcript_segment_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "frame_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "image_indices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "type",
+        "start_ms",
+        "end_ms",
+        "transcript_segment_ids",
+        "frame_ids",
+        "image_indices"
+      ],
+      "additionalProperties": false
+    },
+    "trainingRow": {
+      "type": "object",
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "phase": {
+          "enum": [
+            "warmup",
+            "work",
+            "cooldown",
+            "other"
+          ]
+        },
+        "exercise": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sets": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reps": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "load": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intensity": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tempo": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[vsqdu][1-9][0-9]*$"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "order",
+        "phase",
+        "exercise",
+        "sets",
+        "reps",
+        "duration",
+        "load",
+        "rest",
+        "intensity",
+        "tempo",
+        "notes",
+        "evidence_ids"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
