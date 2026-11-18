@@ -68,4 +68,28 @@ def test_package_reuses_media_and_only_publishes_valid_pair(tmp_path, monkeypatc
     assert (path / "assets/image_2.jpg").read_bytes() == (images / "03.jpg").read_bytes()
     assert note_v3.generate(package, media, output, config, "standard") == (path, True)
     assert len(queue_calls) == 2
-    assert note_v3.read_json(path / "note.json")["metadata"]["processing"]["note_status"] == "draft"
+    note = note_v3.read_json(path / "note.json")
+    assert note["metadata"]["processing"]["note_status"] == "draft"
+
+    # A nutrition entry can cite an official document that qualifies the
+    # advice, while still requiring its original source.
+    note["metadata"]["classification"]["modules"] = ["运动营养"]
+    note["sports_nutrition"] = [{
+        "item": "剂量", "amount": None, "unit": None, "conditions": None,
+        "author_basis": None, "limitations": "适用条件待核", "evidence_ids": ["v1", "d1"],
+    }]
+    note["evidence"].append({
+        "id": "d1", "detail": "适用条件", "channel": "research", "origin": None, "search": None,
+        "citation": {"author": "示例机构", "year": 2024, "title": "示例指南", "venue": "示例机构",
+                     "url": "https://example.com/guide", "doi": None},
+        "strength": None, "limits": "适用条件有限",
+    })
+    note["claims"][0]["verification"].update(
+        external_checked=True, external_status="partly_supported", evidence_ids=["d1"],
+    )
+    body = "# 训练图文\n\n原图[^v1]，适用条件[^d1]。\n\n[^v1]: 原图\n[^d1]: 适用条件\n"
+    inputs = note_v3.inventory(package, media, "standard")
+    note_v3.validate(note, body, inputs)
+    note["sports_nutrition"][0]["evidence_ids"] = ["d1"]
+    with pytest.raises(ValueError, match="营养条目必须有原片出处"):
+        note_v3.validate(note, body, inputs)

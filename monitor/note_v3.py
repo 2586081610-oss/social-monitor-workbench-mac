@@ -193,7 +193,9 @@ def validate(note, body, inputs):
                 raise ValueError("训练动作顺序必须连续")
             require_refs(row["evidence_ids"], "v")
     for row in note["sports_nutrition"] or []:
-        require_refs(row["evidence_ids"], "v")
+        require_refs(row["evidence_ids"], "vsqdu")
+        if not any(ref.startswith("v") for ref in row["evidence_ids"]):
+            raise ValueError("营养条目必须有原片出处")
 
 
 def generate(package, media_root, output_root, config, level):
@@ -256,6 +258,7 @@ JSON 符合 schema，metadata 只需提供 title、classification、relations、
 其余 metadata 由程序填入。图文或视频按内容分类，范围以外停止并说明。只记录输入里实际提供的素材与可确认的观点。
 为关键训练数据、画面和观点就近挂脚标，正文末尾逐条定义。每个 evidence ID 都必须被正文引用。
 origin 的字段全部填写，无关字段用 null 或 []。顺序表全部使用原片证据。
+运动营养条目至少引用一个原片脚标，可同时引用与剂量或适用边界有关的外部证据。
 重要的不确定性写入 review_items，说明原因。动态轨迹缺连续证据时只写瞬间观察。
 缺失参数写 null，Markdown 说明已检查的范围；未提供完整视频时不要断言整部原片未提及。
 仅在 related_notes 提供可对照的真实候选时写关联。训练计划模块仅用于有实质安排的内容。
