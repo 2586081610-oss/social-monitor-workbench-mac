@@ -54,8 +54,9 @@ def test_package_reuses_media_and_only_publishes_valid_pair(tmp_path, monkeypatc
         assert data["assets"]["image_2"]["image_index"] == 2
         queue_calls.append(stage)
         link = "unknown.jpg" if len(queue_calls) == 1 else "assets/image_2.jpg"
+        image_marker = "!" if len(queue_calls) == 1 else ""
         (stage / "body.md").write_text(f"# 训练图文\n\n图2示范坐姿[^v1]。\n\n"
-                                       f"![坐姿]({link})\n\n[^v1]: 图2可见。\n")
+                                       f"{image_marker}[坐姿]({link})\n\n[^v1]: 图2可见。\n")
         (stage / "note.json").write_text(json.dumps(draft))
         return 0, ""
 

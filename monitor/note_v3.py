@@ -20,6 +20,11 @@ REPO = Path(__file__).resolve().parents[1]
 DOCS = REPO / "docs/note-templates/v3"
 FOOTNOTE = r"\[\^([vsqdu][1-9][0-9]*)\]"
 IMAGE = re.compile(r"!\[[^\]\n]*\]\(([^)\n]+)\)")
+ASSET_LINK = re.compile(r"\]\((assets/[^)\n]+)\)")
+
+
+def asset_links(body):
+    return set(IMAGE.findall(body)) | set(ASSET_LINK.findall(body))
 
 
 def read_json(path):
@@ -119,7 +124,7 @@ def validate(note, body, inputs):
             or set(definitions) != evidence.keys() or set(mentions) != evidence.keys()):
         raise ValueError("正文、脚标定义和 JSON 证据台账必须一一对应")
     assets = {asset["link"] for asset in inputs["assets"].values()}
-    if not set(IMAGE.findall(body)) <= assets:
+    if not asset_links(body) <= assets:
         raise ValueError("图片链接不在素材清单中")
     meta = note["metadata"]
     duration = meta["source"]["duration_seconds"]
@@ -234,7 +239,7 @@ def generate(package, media_root, output_root, config, level):
         if not separator or yaml.safe_load(header) != existing["metadata"] or existing["metadata"]["version"]["input_hash"] != input_hash:
             raise ValueError("现有输出的元数据与输入不一致")
         validate(existing, body, inputs)
-        if any(not (destination / link).is_file() for link in IMAGE.findall(body)):
+        if any(not (destination / link).is_file() for link in asset_links(body)):
             raise ValueError("现有笔记缺少图片")
         return destination, True
 
@@ -294,7 +299,7 @@ origin 的字段全部填写，无关字段用 null 或 []。顺序表全部使�
         except Exception as exc:
             raise ValueError(f"生成文件未通过 v3 校验：{exc}") from exc
         asset_sources = {asset["link"]: asset["source"] for asset in inputs["assets"].values()}
-        for link in set(IMAGE.findall(body)):
+        for link in asset_links(body):
             target = stage / link
             target.parent.mkdir(exist_ok=True)
             shutil.copyfile(asset_sources[link], target)
